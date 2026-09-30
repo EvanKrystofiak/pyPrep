@@ -528,5 +528,13 @@ def run_series(series: TiltSeries, settings: ProcessingSettings, out_root,
         else:
             result["recon"] = reconstruct_series(series, settings, out_root, progress, cancel,
                                                  log_callback)["status"]
+    if result["stacks"] in ("complete", "skipped"):
+        try:                                   # thumbnail for the session gallery (never fatal)
+            from .thumbs import series_thumbnail
+            png, source = series_thumbnail(Path(out_root) / series.name)
+            if png is not None:
+                say(f"{series.name}: gallery thumbnail ({source}) -> {png.name}")
+        except Exception as e:
+            say(f"{series.name}: could not make the gallery thumbnail: {e}")
     result["seconds"] = round(time.perf_counter() - t0, 1)
     return result

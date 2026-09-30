@@ -1,6 +1,7 @@
 """Tilt QC, stale-output detection after exclusions, presets, TIFF export, disk estimate."""
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -122,3 +123,33 @@ def test_estimate_output_bytes(tmp_path):
     s.recon.enabled = False
     s.output.bin_levels = [1, 4]
     assert estimate_output_bytes(ts, s) == (64 * 48 + 16 * 12) * 1 * 4       # one usable tilt, float32
+
+
+def test_thumbnails_gallery_and_selection(tmp_path):
+    import zlib
+    from pyprep.thumbs import gallery_entries, load_selection, save_selection, tomogram_thumbnail, write_png_gray
+    # PNG writer produces a valid, decodable image
+    img = (np.arange(12 * 20) % 256).astype(np.uint8).reshape(12, 20)
+    write_png_gray(tmp_path / "a.png", img)
+    raw = (tmp_path / "a.png").read_bytes()
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+    idat = raw[raw.index(b"IDAT") + 4: raw.index(b"IEND") - 8]
+    rows = zlib.decompress(idat)
+    assert rows == b"".join(b"\x00" + img[y].tobytes() for y in range(12))
+    # tomogram thumbnail = mean of the central slices
+    vol = np.zeros((30, 40, 50), np.float32)
+    vol[10:20, 5:15, 5:15] = 1.0                      # feature only in the central slices
+    mrc.write_mrc(tmp_path / "rec.mrc", vol)
+    tomogram_thumbnail(tmp_path / "rec.mrc", tmp_path / "t.png", n_slices=10)
+    assert (tmp_path / "t.png").stat().st_size > 50
+    # gallery over an output folder with one series that has a tomogram
+    d = tmp_path / "out" / "TS_1"
+    (d / "imod_bin4").mkdir(parents=True)
+    mrc.write_mrc(d / "imod_bin4" / "TS_1_rec.mrc", vol)
+    (d / "TS_1_pyprep.json").write_text(json.dumps({"series": "TS_1", "status": "complete", "tilts": [],
+                                                     "reconstruction": {"status": "complete",
+                                                                        "tomogram": str(d / "imod_bin4" / "TS_1_rec.mrc")}}))
+    entries = gallery_entries(tmp_path / "out")
+    assert len(entries) == 1 and entries[0]["source"] == "tomogram" and Path(entries[0]["thumbnail"]).exists()
+    save_selection(tmp_path / "out", {"TS_1"})
+    assert load_selection(tmp_path / "out") == {"TS_1"}

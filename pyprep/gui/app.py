@@ -20,6 +20,7 @@ from ..pipeline import estimate_output_bytes, is_complete, recon_complete
 from ..settings import ProcessingSettings
 from ..tiltseries import TiltSeries, find_mdocs, load_tilt_series
 from . import theme
+from .gallery_panel import GalleryPanel
 from .results_panel import ResultsPanel
 from .settings_panel import SettingsForms
 from .theme import card, dim_label, section_label, title_label
@@ -32,6 +33,7 @@ NAV = [
     ("outputs", "Outputs"),
     ("recon", "Reconstruction"),
     ("results", "Results"),
+    ("gallery", "Gallery"),
     ("log", "Log"),
 ]
 STATUS_COLORS = {"done": theme.OK, "running": theme.ACCENT_Hi, "failed": theme.DANGER,
@@ -169,6 +171,8 @@ class MainWindow(QMainWindow):
         self.forms.preview_requested.connect(self.preview)
         self.forms.show_directives_requested.connect(self.show_directives)
         self.results = ResultsPanel()
+        self.gallery = GalleryPanel()
+        self.gallery.open_series.connect(self._open_series_from_gallery)
         self.log_page = LogPage()
         self._pages = {
             "series": self._build_series_page(),
@@ -176,6 +180,7 @@ class MainWindow(QMainWindow):
             "outputs": _scroll(self.forms.outputs_page),
             "recon": _scroll(self.forms.recon_page),
             "results": self.results,
+            "gallery": self.gallery,
             "log": self.log_page,
         }
         self.stack = QStackedWidget()
@@ -357,6 +362,18 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self._pages[key])
         for k, b in self._nav_buttons.items():
             b.setChecked(k == key)
+        if key == "gallery":
+            self.gallery.set_output(self.top.output.path())
+
+    def _open_series_from_gallery(self, name: str):
+        for r, ts in enumerate(self.series):
+            if ts.name == name:
+                self.table.selectRow(r)
+                break
+        out_root = self.top.output.path()
+        if out_root is not None:
+            self.results.load_series(out_root / name, prefer="tomo")
+        self.show_page("results")
 
     # ------------------------------------------------------------------ persistence
     def _restore(self):
@@ -806,13 +823,19 @@ class MainWindow(QMainWindow):
         self.append_log(f"===== Batch finished: {text}" + (f" ({', '.join(failed)})" if failed else "") + " =====")
         self.statusBar().showMessage(text)
         self._notify(text, ok=not failed and not b["cancelled"])
+        if self.top.output.path():
+            self.gallery.out_root = self.top.output.path()
+            self.gallery.refresh()
         if not b["cancelled"] and b["last_row"] is not None and self.top.output.path():
-            r, _ = self._current_series()
-            row = r if r is not None else b["last_row"]
-            if r is None:
-                self.table.selectRow(row)
-            self.results.load_series(self.top.output.path() / self.series[row].name, prefer="tomo")
-            self.show_page("results")
+            if n > 1:
+                self.show_page("gallery")         # several series: pick the good ones at a glance
+            else:
+                r, _ = self._current_series()
+                row = r if r is not None else b["last_row"]
+                if r is None:
+                    self.table.selectRow(row)
+                self.results.load_series(self.top.output.path() / self.series[row].name, prefer="tomo")
+                self.show_page("results")
 
     def _set_busy(self, busy: bool, preview: bool = False):
         self.btn_start.setEnabled(not busy)

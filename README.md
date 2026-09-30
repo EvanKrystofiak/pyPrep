@@ -28,7 +28,9 @@ For every tilt series in a session folder, pyPrep:
 pyPrep flags problem tilts (dark or blocked, drifting, poorly aligned) before
 and after processing, warns about saturated fraction files, resumes interrupted
 batches, and skips missing tilts. Its viewer shows the stacks, tomograms and
-per-tilt drift and QC plots, and exports TIFF for Fiji.
+per-tilt drift and QC plots, and exports TIFF for Fiji. A **Gallery** shows a
+thumbnail of every tomogram in the session, with its name, to pick the best data
+to take further.
 
 ## Quick start
 

@@ -11,6 +11,7 @@ app does can also be run from the [command line](command-line.md).
 - [Reconstruction](#reconstruction-page)
 - [Running a batch](#running-a-batch)
 - [Results](#results-page)
+- [Gallery](#gallery-page)
 - [Log](#log-page)
 - [Continuing in etomo](#continuing-in-etomo)
 - [Tips](#tips)
@@ -194,7 +195,7 @@ names are listed in `IMOD\com\directives.csv`.
 4. When the batch ends, the Batch panel shows *Finished N series in X min*
    (green) or which series had problems (red), the taskbar button flashes, a
    Windows notification appears (useful for overnight batches), and the
-   Results page opens on the tomogram.
+   Results page opens on the tomogram — or, for several series, the Gallery.
 
 The settings of each run are saved as `pyprep_settings_last_run.json` in the
 output folder.
@@ -224,6 +225,22 @@ speed.
 
 After **Test on one tilt**, the slider shows the unaligned (0) and aligned (1)
 sums of that tilt.
+
+## Gallery page
+
+A grid with one thumbnail per processed tilt series and its name underneath,
+for choosing which data to take further. Each thumbnail is the average of the
+10 central slices of the series' tomogram (series without a tomogram show their
+0° tilt). Thumbnails are made automatically at the end of each series, and for
+older results when the Gallery is opened.
+
+- **Tick the box** next to a thumbnail to *keep* that series. Picks are saved in
+  the output folder (`pyprep_selection.json`).
+- **Double-click** a thumbnail to open that series on the Results page.
+- **Size** changes the thumbnail size; **Refresh** rescans the output folder.
+- **Save contact sheet…** writes one PNG with all thumbnails and names (kept
+  series outlined), for notes or sharing; **Export kept list…** writes the
+  names of the kept series to a text file.
 
 ## Log page
 

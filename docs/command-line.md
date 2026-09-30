@@ -113,6 +113,16 @@ The exit code is 0 if every series succeeded, 1 otherwise.
 | `--force` | reprocess series that are already complete |
 | `-q`, `--quiet` | print only progress and a summary per series |
 
+## `pyprep gallery` — thumbnails and contact sheet
+
+```bat
+env\python.exe -m pyprep gallery "D:\Sessions\2026-09-30\pyPrep"
+```
+
+Makes any missing thumbnails (average of the 10 central tomogram slices) and
+writes `gallery.png`, a grid of all series with their names, in the output
+folder. `--sheet FILE` chooses another file, `--tile N` the thumbnail size.
+
 ## `pyprep export` — TIFF for Fiji / segmentation
 
 ```bat

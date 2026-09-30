@@ -145,6 +145,21 @@ def cmd_export(args) -> int:
     return 0
 
 
+def cmd_gallery(args) -> int:
+    from .thumbs import contact_sheet, gallery_entries, load_selection
+    entries = gallery_entries(args.output)
+    if not entries:
+        print("No processed tilt series found in", args.output)
+        return 1
+    for e in entries:
+        print(f"  {e['series']:30s} {e['source'] or 'no image':10s} {e['tilts']:3d} tilts"
+              + (f", {e['flagged']} flagged" if e['flagged'] else ""))
+    sheet = contact_sheet(entries, args.sheet or Path(args.output) / "gallery.png", tile=args.tile,
+                          keep=load_selection(args.output))
+    print("Contact sheet:", sheet)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="pyprep", description="Cryo-ET tilt-series preparation")
     ap.add_argument("--version", action="version", version=f"pyPrep {__version__}")
@@ -188,6 +203,12 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="reprocess series that are already complete")
     p.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("gallery", help="thumbnails of every processed series + a contact sheet (gallery.png)")
+    p.add_argument("output", help="pyPrep output folder (the one containing the series folders)")
+    p.add_argument("--sheet", help="contact sheet file (default: <output>/gallery.png)")
+    p.add_argument("--tile", type=int, default=256, help="thumbnail size in the contact sheet (pixels)")
+    p.set_defaults(func=cmd_gallery)
 
     p = sub.add_parser("export", help="save an MRC stack/tomogram as an ImageJ TIFF (8-bit, pixel size in nm)")
     p.add_argument("input", help="MRC file")

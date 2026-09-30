@@ -5,6 +5,8 @@ For every tilt series, pyPrep writes a folder `<output>\<series>\`:
 ```
 <output>\
 ├── pyprep_settings_last_run.json       settings of the most recent batch
+├── pyprep_selection.json               series ticked "keep" in the Gallery
+├── gallery.png                         contact sheet (Gallery / `pyprep gallery`)
 └── TS_01\
     ├── TS_01.mrc                       aligned sum, full resolution
     ├── TS_01.rawtlt                    tilt angles, one per line, in stack order
@@ -16,6 +18,7 @@ For every tilt series, pyPrep writes a folder `<output>\<series>\`:
     ├── TS_01_motion.csv                per-frame shifts of every tilt
     ├── TS_01_pyprep.json               full record: settings, per-tilt results, outputs, reconstruction
     ├── TS_01_pyprep.log                log of alignment and reconstruction
+    ├── TS_01_thumb.png                 gallery thumbnail (10 central tomogram slices)
     └── imod_bin4\                      batchruntomo / etomo project (if reconstruction is on)
         ├── TS_01.edf                   open this in etomo
         ├── TS_01_rec.mrc               final tomogram (trimmed, rotated so Z is the slice axis)
