@@ -102,6 +102,19 @@ def test_mdoc_serialem_axis():
     assert doc.tilt_axis_angle == pytest.approx(85.3)
 
 
+def test_mdoc_titles_clipped_for_imod():
+    # IMOD cannot read an mdoc whose [T = ...] line is longer than an MRC title (80 characters)
+    from pyprep.io.mdoc import MAX_TITLE_LEN, clip_titles
+    long = "pyPrep 0.1.0: motion-corrected tilt series from Position_31.mdoc  30-Sep-26  18:11:31"
+    doc = parse_mdoc(f"PixelSpacing = 1.6\n[T = {long}]\n[T =     Tilt axis angle = 85.3, binning = 1]\n"
+                     "[ZValue = 0]\nTiltAngle = 0\n")
+    again = parse_mdoc(format_mdoc(doc))
+    assert again.titles[0] == long[:MAX_TITLE_LEN] and again.tilt_axis_angle == pytest.approx(85.3)
+    text = clip_titles(f"ImageFile = a.mrc\n\n[T = {long}]\n\n[ZValue = 0]\nTiltAngle = 0\n")
+    assert parse_mdoc(text).titles == [long[:MAX_TITLE_LEN]]
+    assert "ImageFile = a.mrc" in text and "[ZValue = 0]" in text
+
+
 def test_tilt_series_matching(tmp_path):
     (tmp_path / "TS_1.mdoc").write_text(TOMO5_MDOC)
     for name in ["TS_1_001_-0.10_20250113_171527_fractions.mrc",     # lower-case 'fractions'
@@ -156,6 +169,30 @@ def test_directives_patch_and_gold():
     assert g["runtime.Fiducials.any.trackingMethod"] == "0" and g["setupset.copyarg.gold"] == "10"
     assert g["comparam.tilt.tilt.THICKNESS"] == "152" and "runtime.Reconstruction.any.fallbackThickness" not in g
     assert g["comparam.x.y.Z"] == "3"
+
+
+def test_recon_dir_mdoc_readable_by_imod(tmp_path):
+    # stacks written by earlier versions have over-long titles; the copy for batchruntomo must not
+    from pyprep.imod import prepare_recon_dir
+    from pyprep.io.mdoc import MAX_TITLE_LEN, read_mdoc
+    stack = tmp_path / "TS_1_bin4.mrc"
+    mrc.write_mrc(stack, np.zeros((2, 8, 8), np.float32))
+    stack.with_suffix(".rawtlt").write_text("  -1.00\n   1.00\n")
+    stack.with_name(stack.name + ".mdoc").write_text(
+        f"ImageFile = {stack.name}\n\n[T = pyPrep 0.1.0: {'x' * 90}]\n\n[ZValue = 0]\nTiltAngle = -1\n")
+    recon = prepare_recon_dir(tmp_path, "TS_1", stack)
+    doc = read_mdoc(recon / "TS_1.mrc.mdoc")
+    assert recon.name == "imod_bin4" and doc.header["ImageFile"] == "TS_1.mrc"
+    assert all(len(t) <= MAX_TITLE_LEN for t in doc.titles) and doc.is_pyprep
+
+
+def test_batchruntomo_failure_lines():
+    # batchruntomo exits 0 when a data set aborts; pyPrep reads the failure from its output
+    from pyprep.imod import batchruntomo_failed
+    assert batchruntomo_failed("ABORT SET: Stack file does not exist: Position_31.mrc")
+    assert batchruntomo_failed("Batch run finished; failures occurred for 1 datasets")
+    assert not batchruntomo_failed("Batch run finished; no failures occurred")
+    assert not batchruntomo_failed("Successfully finished xcorr.com   in 00:02.1   [brt3]")
 
 
 def test_settings_roundtrip_with_recon(tmp_path):

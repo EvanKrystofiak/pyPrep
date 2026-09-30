@@ -426,8 +426,9 @@ def build_stack_mdoc(series: TiltSeries, tilts, out: StackOutput, nx: int, ny: i
                   "ImageFile": out.path.name, "ImageSize": f"{nx} {ny}", "DataMode": str(mode)}
     kind_text = {"sum": "motion-corrected", "even": "even-frame half-sum", "odd": "odd-frame half-sum",
                  "dw": "motion-corrected, DOSE-WEIGHTED"}[out.kind]
-    doc.titles.append(f"{PYPREP_TAG} {__version__}: {kind_text} tilt series from {series.mdoc_path.name}  "
-                      f"{time.strftime('%d-%b-%y  %H:%M:%S')}")
+    # Date first: titles are clipped to 80 characters (MAX_TITLE_LEN), so a long series name loses its tail.
+    doc.titles.append(f"{PYPREP_TAG} {__version__} {time.strftime('%d-%b-%y %H:%M')}: {kind_text} "
+                      f"from {series.mdoc_path.name}")
     spot = series.tilts[0].section.get("SpotSize", "0") if series.tilts else "0"
     axis = series.tilt_axis if series.tilt_axis is not None else 0.0
     # This title format is what IMOD looks for to pick up the tilt axis angle.

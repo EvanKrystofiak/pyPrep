@@ -26,6 +26,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Callable
 
+from .io.mdoc import clip_titles
+
 PRESETS = {
     "patch": "Patch tracking (no gold)",
     "gold": "Gold fiducials",
@@ -207,7 +209,8 @@ def prepare_recon_dir(out_dir: Path, series_name: str, stack: Path, defocus_file
     shutil.copyfile(stack.with_suffix(".rawtlt"), recon_dir / f"{series_name}.rawtlt")
     mdoc = stack.with_name(stack.name + ".mdoc")
     if mdoc.exists():
-        text = mdoc.read_text().replace(f"ImageFile = {stack.name}", f"ImageFile = {dst.name}")
+        # Stacks written before titles were clipped still carry over-long titles that IMOD cannot read.
+        text = clip_titles(mdoc.read_text().replace(f"ImageFile = {stack.name}", f"ImageFile = {dst.name}"))
         (recon_dir / f"{dst.name}.mdoc").write_text(text)
     return recon_dir
 
@@ -246,12 +249,24 @@ def run_batchruntomo(recon_dir: Path, root: str, directive_file: Path, rs: Recon
                     return
         watcher = threading.Thread(target=watch, daemon=True)
         watcher.start()
+    failed = False
     for line in proc.stdout:
         line = line.rstrip()
         if line:
             log(line)
+            failed = failed or batchruntomo_failed(line)
     rc = proc.wait()
+    if rc == 0 and failed:
+        rc = 1          # batchruntomo exits 0 even when the data set aborted
     return rc
+
+
+_BRT_FAILURE_RE = re.compile(r"^ABORT SET:|failures occurred for \d+ data ?sets?")
+
+
+def batchruntomo_failed(line: str) -> bool:
+    """True for the batchruntomo output lines that mean the data set was aborted."""
+    return bool(_BRT_FAILURE_RE.search(line.strip()))
 
 
 def find_tomogram(recon_dir: Path, root: str) -> Path | None:

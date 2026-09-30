@@ -18,8 +18,21 @@ from dataclasses import dataclass, field
 _SECTION_RE = re.compile(r"^\[\s*([^=\]]+?)\s*=\s*(.*?)\s*\]$")
 _KV_RE = re.compile(r"^([^=]+?)\s*=\s*(.*)$")
 _SERIALEM_AXIS_RE = re.compile(r"Tilt axis angle\s*=\s*([-+0-9.eE]+)", re.IGNORECASE)
+_TITLE_LINE_RE = re.compile(r"^(\[\s*T\s*=\s*)(.*?)(\s*\])[ \t]*$", re.MULTILINE)
 
 PYPREP_TAG = "pyPrep"
+# MRC header titles are 80 characters; IMOD cannot read an mdoc with a longer [T = ...] line
+# (header: "AdocGetSectionName, string is too long"), and batchruntomo then reports the stack missing.
+MAX_TITLE_LEN = 80
+
+
+def clip_title(title: str) -> str:
+    return title[:MAX_TITLE_LEN].rstrip()
+
+
+def clip_titles(text: str) -> str:
+    """Shorten the ``[T = ...]`` lines of mdoc text to what IMOD can read."""
+    return _TITLE_LINE_RE.sub(lambda m: m.group(1) + clip_title(m.group(2)) + m.group(3), text)
 
 
 @dataclass
@@ -134,7 +147,7 @@ def format_mdoc(doc: Mdoc) -> str:
     lines = [f"{k} = {v}" for k, v in doc.header.items()]
     lines.append("")
     for t in doc.titles:
-        lines.append(f"[T = {t}]")
+        lines.append(f"[T = {clip_title(t)}]")
         lines.append("")
     for s in doc.sections:
         lines.append(f"[{s.kind} = {s.index}]")
