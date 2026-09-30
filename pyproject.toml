@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyprep"
+version = "0.1.0"
+description = "Cryo-ET tilt-series preparation: GPU frame alignment and etomo-ready stacks, for Windows"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "torch",
+    "tifffile",
+    "PySide6",
+    "pyqtgraph",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+pyprep = "pyprep.cli:main"
+
+[project.gui-scripts]
+pyprep-gui = "pyprep.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["pyprep*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

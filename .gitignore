@@ -1,0 +1,22 @@
+# Python environment and caches
+env/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Data - never commit microscope data or outputs
+Raw Data/
+FinalTomogramReferenceData/
+output/
+*.mrc
+*.mrcs
+*.eer
+*.tif
+*.tiff
+*.dm4
+*.st
+*.rec
+
+# Reference material supplied with the project (not part of pyPrep)
+Useful scripts/
