@@ -111,6 +111,21 @@ larger fractions.
   directives or the patch size setting), or the gold preset if the sample has
   fiducials.
 
+## CTF estimation
+
+- **"CTF not estimated - it needs the bin 1 aligned stack"**: this series was
+  processed before CTF estimation existed, without a bin 1 stack. Tick bin 1
+  and re-run it (the stacks are redone), or run `pyprep ctf` once a bin 1 stack
+  exists.
+- **Defocus per tilt looks noisy or has red points**: check those tilts'
+  *CTF fit* plot. Thick ice, drift and contamination weaken the rings. The fit
+  range can be narrowed (for example 30 to 12 Å) on the Frame alignment page.
+- **"direction of the defocus gradient is uncertain"**: the series has few
+  tilts beyond 20° or weak rings. pyPrep then uses the majority vote, and CTF
+  correction at bin 4 is barely affected by it.
+- **Phase-plate data**: phase shifts are not fitted yet. Turn CTF correction
+  off for such data.
+
 ## Disk space
 
 A full-resolution float32 stack of a K3 tilt series is ~4.3 GB. To save space:

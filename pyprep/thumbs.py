@@ -83,16 +83,22 @@ def _record(series_dir: Path) -> dict | None:
 
 
 def _find_tomogram(series_dir: Path, rec: dict | None) -> Path | None:
-    recon = (rec or {}).get("reconstruction") or {}
-    if recon.get("tomogram") and Path(recon["tomogram"]).exists():
-        return Path(recon["tomogram"])
+    """The series' tomogram, preferring the deconvolved one (clearer at thumbnail size)."""
+    def best(recon: dict) -> Path | None:
+        for key in ("deconvolved", "tomogram"):
+            if recon.get(key) and Path(recon[key]).exists():
+                return Path(recon[key])
+        return None
+    found = best((rec or {}).get("reconstruction") or {})
+    if found is not None:
+        return found
     for j in sorted(series_dir.glob("imod_bin*/pyprep_recon.json")):
         try:
-            t = json.loads(j.read_text()).get("tomogram")
+            found = best(json.loads(j.read_text()))
         except (OSError, ValueError):
             continue
-        if t and Path(t).exists():
-            return Path(t)
+        if found is not None:
+            return found
     return None
 
 

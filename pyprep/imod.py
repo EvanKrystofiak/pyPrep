@@ -50,6 +50,10 @@ class ReconSettings:
     remove_xrays: bool = True
     cpus: int = max(1, (os.cpu_count() or 2) - 1)
     use_gpu: bool = False
+    ctf_correct: bool = True               # phase-flip with pyPrep's per-tilt defocus (IMOD ctfphaseflip)
+    deconvolve: bool = True                # also write <series>_rec_deconv.mrc (Wiener-like filter)
+    deconv_strength: float = 1.0
+    deconv_falloff: float = 1.0
     extra_directives: str = ""             # advanced: raw "key = value" lines, override the preset
 
     def to_dict(self):
@@ -103,8 +107,11 @@ def _imod_env() -> dict:
 
 # ------------------------------------------------------------------ directives
 def build_directives(pixel_size_A: float, tilt_axis: float, voltage_kv: float,
-                     rs: ReconSettings) -> dict:
-    """Directive dict for a stack with the given pixel size (A, of the stack being reconstructed)."""
+                     rs: ReconSettings, ctf: dict | None = None) -> dict:
+    """Directive dict for a stack with the given pixel size (A, of the stack being reconstructed).
+
+    ``ctf`` is pyPrep's CTF record (see ``ctf.save_result``); with ``rs.ctf_correct``
+    batchruntomo phase-flips the aligned stack using ``<series>.defocus``."""
     nm = pixel_size_A / 10.0
     to_px = lambda length_nm: max(1, int(round(length_nm / nm)))   # noqa: E731
     d = imod_dir()
@@ -162,6 +169,12 @@ def build_directives(pixel_size_A: float, tilt_axis: float, voltage_kv: float,
             "runtime.Positioning.any.hasGoldBeads": "0",
             "runtime.AlignedStack.any.eraseGold": "0",
         })
+    if rs.ctf_correct and ctf:
+        dirs["runtime.AlignedStack.any.correctCTF"] = "1"
+        dirs["setupset.copyarg.defocus"] = f"{ctf['defocus_um'] * 1000:.0f}"
+        dirs["setupset.copyarg.Cs"] = f"{ctf.get('settings', {}).get('cs_mm', 2.7):g}"
+        if ctf.get("handedness", 1) < 0:
+            dirs["comparam.ctfcorrection.ctfphaseflip.InvertTiltAngles"] = "1"
     for line in rs.extra_directives.splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
@@ -177,14 +190,17 @@ def write_directive_file(path: Path, directives: dict, header: str = "") -> None
 
 
 # ------------------------------------------------------------------ running
-def prepare_recon_dir(out_dir: Path, series_name: str, stack: Path) -> Path:
-    """Copy the stack (+ .rawtlt and .mdoc) into ``imod_bin<N>/<series>.mrc``."""
+def prepare_recon_dir(out_dir: Path, series_name: str, stack: Path, defocus_file: Path | None = None) -> Path:
+    """Copy the stack (+ .rawtlt, .mdoc and the defocus file) into ``imod_bin<N>/<series>.mrc``."""
     m = re.search(r"_bin(\d+)", stack.stem)
     recon_dir = out_dir / f"imod_bin{m.group(1) if m else 1}"
     recon_dir.mkdir(parents=True, exist_ok=True)
     # Manual-positioning leftovers belong to the previous run's alignment.
-    for old in ("tilt.com.pyprep_orig", "pyprep_pos_trial.mrc", "pyprep_pos_ali_bin2.mrc"):
+    for old in ("tilt.com.pyprep_orig", "pyprep_pos_trial.mrc", "pyprep_pos_ali_bin2.mrc",
+                f"{series_name}.defocus", f"{series_name}_rec_deconv.mrc"):
         (recon_dir / old).unlink(missing_ok=True)
+    if defocus_file is not None and Path(defocus_file).exists():
+        shutil.copyfile(defocus_file, recon_dir / f"{series_name}.defocus")
     dst = recon_dir / f"{series_name}.mrc"
     shutil.copyfile(stack, dst)
     shutil.copyfile(stack.with_suffix(".rawtlt"), recon_dir / f"{series_name}.rawtlt")
@@ -200,7 +216,8 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 
 def run_batchruntomo(recon_dir: Path, root: str, directive_file: Path, rs: ReconSettings,
-                     log: Callable[[str], None] = print, cancel: threading.Event | None = None) -> int:
+                     log: Callable[[str], None] = print, cancel: threading.Event | None = None,
+                     start: float | None = None, end: float | None = None) -> int:
     d = imod_dir()
     if d is None:
         raise RuntimeError("IMOD not found")
@@ -210,6 +227,10 @@ def run_batchruntomo(recon_dir: Path, root: str, directive_file: Path, rs: Recon
             "-NiceValue", "0", "-EtomoDebug", "0"]
     if rs.use_gpu:
         args += ["-GPUMachineList", "1"]
+    if start is not None:
+        args += ["-StartingStep", f"{start:g}"]
+    if end is not None:
+        args += ["-EndingStep", f"{end:g}"]
     log("Running: batchruntomo " + " ".join(args[4:]))
     proc = subprocess.Popen(args, cwd=str(recon_dir), env=_imod_env(), stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1,
@@ -244,7 +265,7 @@ def find_tomogram(recon_dir: Path, root: str) -> Path | None:
 
 def reconstruct(out_dir: Path, series_name: str, stack: Path, pixel_size_A: float, tilt_axis: float,
                 voltage_kv: float, rs: ReconSettings, log: Callable[[str], None] = print,
-                cancel: threading.Event | None = None) -> dict:
+                cancel: threading.Event | None = None, ctf: dict | None = None) -> dict:
     """Set up and run batchruntomo on ``stack``; returns a result record."""
     t0 = time.perf_counter()
     # batchruntomo runs inside the reconstruction folder, so every path must be absolute.
@@ -253,18 +274,40 @@ def reconstruct(out_dir: Path, series_name: str, stack: Path, pixel_size_A: floa
     if not ok:
         raise RuntimeError(msg)
     log(msg)
-    recon_dir = prepare_recon_dir(out_dir, series_name, stack)
-    dirs = build_directives(pixel_size_A, tilt_axis, voltage_kv, rs)
+    use_ctf = bool(rs.ctf_correct and ctf and ctf.get("defocus_file") and Path(ctf["defocus_file"]).exists())
+    if rs.ctf_correct and not use_ctf:
+        log("CTF correction skipped: no pyPrep CTF estimate for this series")
+    recon_dir = prepare_recon_dir(out_dir, series_name, stack, Path(ctf["defocus_file"]) if use_ctf else None)
+    dirs = build_directives(pixel_size_A, tilt_axis, voltage_kv, rs, ctf if use_ctf else None)
+    if use_ctf:
+        log(f"CTF correction with {series_name}.defocus (defocus {ctf['defocus_um']:.2f} um"
+            + (", tilt angles inverted for ctfphaseflip)" if ctf.get("handedness", 1) < 0 else ")"))
     adoc = recon_dir / "pyprep_batchruntomo.adoc"
     write_directive_file(adoc, dirs, f"pyPrep batchruntomo directives - preset: {PRESETS.get(rs.preset, rs.preset)}\n"
                                      f"stack: {stack.name}  ({pixel_size_A:.2f} A/px)")
     log(f"Reconstruction ({PRESETS.get(rs.preset, rs.preset)}) in {recon_dir}")
-    rc = run_batchruntomo(recon_dir, series_name, adoc, rs, log, cancel)
+    if use_ctf:
+        # tiltalign refines the tilt angles, and ctfphaseflip matches defocus entries to views by
+        # angle: run up to CTF plotting (step 9), re-label the defocus file with the final angles,
+        # then continue from 3D gold detection (step 10).
+        rc = run_batchruntomo(recon_dir, series_name, adoc, rs, log, cancel, end=9)
+        if rc == 0 and not (cancel is not None and cancel.is_set()):
+            from .ctf import retarget_defocus_file
+            tlt = recon_dir / f"{series_name}.tlt"
+            try:
+                n = retarget_defocus_file(recon_dir / f"{series_name}.defocus", tlt)
+                log(f"{series_name}.defocus: {n} views re-labelled with the aligned tilt angles ({tlt.name})")
+            except (OSError, ValueError) as e:
+                log(f"WARNING: could not match the defocus file to {tlt.name}: {e}")
+            rc = run_batchruntomo(recon_dir, series_name, adoc, rs, log, cancel, start=10)
+    else:
+        rc = run_batchruntomo(recon_dir, series_name, adoc, rs, log, cancel)
     tomo = find_tomogram(recon_dir, series_name)
     cancelled = cancel is not None and cancel.is_set()
     status = "cancelled" if cancelled else ("complete" if rc == 0 and tomo is not None else "failed")
     rec = {"status": status, "returncode": rc, "preset": rs.preset, "recon_dir": str(recon_dir),
            "tomogram": str(tomo) if tomo else None, "stack": str(stack), "directives": dirs,
+           "ctf_corrected": use_ctf,
            "settings": rs.to_dict(), "seconds": round(time.perf_counter() - t0, 1)}
     (recon_dir / "pyprep_recon.json").write_text(json.dumps(rec, indent=1))
     log(f"Reconstruction {status}" + (f": {tomo.name}" if tomo else "") + f" ({rec['seconds']:.0f} s)")

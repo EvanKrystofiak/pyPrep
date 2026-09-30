@@ -17,7 +17,7 @@ from typing import Callable
 import numpy as np
 import torch
 
-from . import __version__, gpu, qc
+from . import __version__, ctf, gpu, qc
 from .io import mrc
 from .io.frames import open_movie
 from .io.mdoc import Mdoc, MdocSection, PYPREP_TAG, write_mdoc
@@ -85,7 +85,7 @@ def estimate_output_bytes(series: TiltSeries, settings: ProcessingSettings) -> i
         stack = (nx // b) * (ny // b) * n * 4
         thick = max(r.thickness_nm, r.positioning_thickness_nm) * 10 / (series.pixel_size * b)
         volume = (nx // b) * (ny // b) * thick * 4
-        total += 4 * stack + 3 * volume          # stack copies + aligned stacks; full/trimmed/trial volumes
+        total += 4 * stack + (4 if r.deconvolve else 3) * volume   # stacks; full/trimmed/trial(/deconvolved)
     return int(total)
 
 
@@ -234,6 +234,116 @@ def _record_qc(record: dict, log) -> None:
         log.info("QC: no tilts flagged")
 
 
+def _fit_ctf(collector, series: TiltSeries, out_dir: Path, device, log) -> dict | None:
+    """Fit the collected spectra, write <name>.defocus / _ctf.npz, log a summary."""
+    try:
+        t0 = time.perf_counter()
+        axis = series.tilt_axis if series.tilt_axis is not None else 0.0
+        res = ctf.fit_series(collector, axis, series.voltage, device, log.info)
+        rec = ctf.save_result(res, out_dir, series.name)
+        d = res.defocus_um
+        res_a = [t.resolution_A for t in res.tilts]
+        log.info(f"CTF: defocus {rec['defocus_um']:.2f} um (low tilts; range {np.nanmin(d):.2f}-{np.nanmax(d):.2f}), "
+                 f"median fit resolution {np.nanmedian(res_a):.1f} A ({time.perf_counter() - t0:.1f} s) "
+                 f"-> {series.name}.defocus")
+        if 0 < res.handedness_confidence < 0.7:
+            log.warning(f"CTF: the direction of the defocus gradient is uncertain "
+                        f"({100 * res.handedness_confidence:.0f}% agreement)")
+        return rec
+    except Exception as e:
+        log.warning(f"CTF estimation failed: {e}")
+        return None
+
+
+def mdoc_defocus_um(series: TiltSeries) -> float | None:
+    """Target defocus from the mdoc (underfocus positive), if recorded."""
+    vals = []
+    for t in series.tilts:
+        try:
+            vals.append(abs(float(t.section.get("TargetDefocus", "nan"))))
+        except ValueError:
+            pass
+    vals = [v for v in vals if np.isfinite(v) and v > 0]
+    return float(np.median(vals)) if vals else None
+
+
+def ensure_ctf(series: TiltSeries, settings: ProcessingSettings, out_root, log_callback=None,
+               cancel: threading.Event | None = None) -> dict | None:
+    """CTF for a series whose stacks already exist (from the bin-1 aligned stack)."""
+    out_dir = Path(out_root) / series.name
+    j = result_json_path(series, out_dir)
+    try:
+        info = json.loads(j.read_text())
+    except (OSError, ValueError):
+        return None
+    if info.get("ctf") or not settings.ctf.enabled:
+        return info.get("ctf")
+    stack = out_dir / stack_name(series.name, "sum", 1)
+    say = log_callback or (lambda s: None)
+    if not stack.exists():
+        say(f"{series.name}: CTF not estimated - it needs the bin 1 aligned stack (tick bin 1 and re-run)")
+        return None
+    log = _series_logger(out_dir / f"{series.name}_pyprep.log", log_callback, mode="a")
+    try:
+        log.info(f"CTF estimation from {stack.name}")
+        device = gpu.select_device(settings.use_gpu, settings.gpu_id)
+        h = mrc.read_header(stack)
+        angles = [t["angle"] for t in info.get("tilts", [])]
+        if len(angles) != h.nz:
+            angles = [float(a) for a in stack.with_suffix(".rawtlt").read_text().split()]
+        col = ctf.SpectrumCollector(series.pixel_size, settings.ctf)
+        for z in range(h.nz):
+            if cancel is not None and cancel.is_set():
+                return None
+            sec = mrc.read_sections(stack, z, 1, header=h)[0].astype(np.float32)
+            col.add(torch.from_numpy(sec).to(device), angles[z])
+        rec = _fit_ctf(col, series, out_dir, device, log)
+    finally:
+        _close_logger(log)
+    if rec is not None:
+        info = json.loads(j.read_text())
+        info["ctf"] = rec
+        j.write_text(json.dumps(info, indent=1))
+    return rec
+
+
+def deconvolve_series(series: TiltSeries, settings: ProcessingSettings, out_root, rec: dict,
+                      log_callback=None) -> dict | None:
+    """Deconvolved copy of the series' tomogram (``<tomogram>_deconv.mrc``); updates ``rec``."""
+    from . import deconv
+    tomo = Path(rec.get("tomogram") or "")
+    if not tomo.is_file():
+        return None
+    out_dir = Path(out_root) / series.name
+    log = _series_logger(out_dir / f"{series.name}_pyprep.log", log_callback, mode="a")
+    try:
+        info = json.loads(result_json_path(series, out_dir).read_text())
+    except (OSError, ValueError):
+        info = {}
+    try:
+        c = info.get("ctf")
+        if c:
+            defocus, source = c["defocus_um"], "pyPrep CTF estimate"
+        else:
+            defocus, source = mdoc_defocus_um(series) or 3.0, "the mdoc target (no CTF estimate)"
+        cs = (c or {}).get("settings", {}).get("cs_mm", settings.ctf.cs_mm)
+        p = deconv.DeconvParams(pixel_A=series.pixel_size * int(settings.recon.bin), defocus_um=float(defocus),
+                                kv=series.voltage, cs_mm=cs, amplitude=settings.ctf.amplitude_contrast,
+                                strength=settings.recon.deconv_strength, falloff=settings.recon.deconv_falloff,
+                                phase_flipped=bool(rec.get("ctf_corrected")))
+        log.info(f"Deconvolution: defocus from {source}")
+        device = gpu.select_device(settings.use_gpu, settings.gpu_id)
+        out = deconv.deconvolve_file(tomo, deconv.deconv_name(tomo), p, device, log.info)
+        rec["deconvolved"] = str(out)
+        rec["deconv"] = dict(p.__dict__)
+    except Exception as e:
+        log.warning(f"Deconvolution failed: {e}")
+        return None
+    finally:
+        _close_logger(log)
+    return rec
+
+
 def write_rawtlt(path: Path, angles) -> None:
     path.write_text("".join(f"{a:8.2f}\n" for a in angles))
 
@@ -312,7 +422,12 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
         for line in ctx.description:
             (log.warning if line.startswith("WARNING") else log.info)(line)
         frame_bins = {b: ctx.frame_bin(b) for b in bins}
-        layout = FrameLayout.for_shape(ny, nx, list(frame_bins.values()) + [int(ctx.motion.align_bin)])
+        collector, ctf_fb = None, None
+        if settings.ctf.enabled:
+            collector = ctf.SpectrumCollector(series.pixel_size, settings.ctf)
+            ctf_fb = ctx.frame_bin(collector.bin)
+        sum_bins = sorted(set(frame_bins.values()) | ({ctf_fb} if ctf_fb else set()))
+        layout = FrameLayout.for_shape(ny, nx, sum_bins + [int(ctx.motion.align_bin)])
         dtype = np.dtype(o.dtype)
         sample = first.read(0, 1)
         if dtype.kind == "i" and sample.dtype.kind == "f":
@@ -350,7 +465,7 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
                     raise RuntimeError(f"{t.frame_path.name}: frame size {frames.shape[1:]} != {(ny, nx)}")
                 res = mc.align(frames, ctx.frame_pixel, gain=ctx.gain, layout=layout)
                 t2 = time.perf_counter()
-                imgs = mc.sum_frames(frames, res.shifts, ctx.frame_pixel, bins=list(frame_bins.values()),
+                imgs = mc.sum_frames(frames, res.shifts, ctx.frame_pixel, bins=sum_bins,
                                      even_odd=bool(kinds & {"even", "odd"}), dose_weight="dw" in kinds,
                                      frame_doses=t.doses_for(len(frames), frame_counts),
                                      prior_dose=t.prior_dose, voltage_kv=series.voltage, gain=ctx.gain,
@@ -361,6 +476,12 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
                     arr, st = _to_host(imgs[(kind, frame_bins[b])], dtype)
                     host[key] = (arr, st)
                     stats[key].append((st[0], st[1], st[2] / arr.size))
+                if collector is not None:
+                    try:
+                        collector.add(imgs[("sum", ctf_fb)], t.angle, already_binned=True)
+                    except Exception as e:           # CTF is an extra: never stop the stacks for it
+                        log.warning(f"CTF: spectra not collected ({e}); CTF estimation skipped")
+                        collector = None
                 del imgs
                 t3 = time.perf_counter()
                 for f in writes:          # previous tilt's writes must finish (bounds memory, surfaces errors)
@@ -407,6 +528,8 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
             cw.writerow(["z", "acquisition", "angle", "frame", "dx_px", "dy_px"])
             cw.writerows(motion_rows)
         _record_qc(record, log)
+        if collector is not None and len(collector.spectra) == len(tilts):
+            record["ctf"] = _fit_ctf(collector, series, out_dir, device, log)
         record["used_tilts"] = sorted(t.zvalue for t in tilts)
         record["missing"] = [{"acquisition": t.zvalue, "angle": t.angle,
                               "file": t.section.get("SubFramePath")} for t in series.missing]
@@ -478,13 +601,24 @@ def reconstruct_series(series: TiltSeries, settings: ProcessingSettings, out_roo
                  f"bin {b} =====")
         progress(0, total_steps, "IMOD setup")
         axis = series.tilt_axis if series.tilt_axis is not None else 0.0
+        try:
+            ctf_rec = json.loads(result_json_path(series, out_dir).read_text()).get("ctf")
+        except (OSError, ValueError):
+            ctf_rec = None
         rec = imod.reconstruct(out_dir, series.name, stack, series.pixel_size * b, axis,
-                               series.voltage, settings.recon, log=on_line, cancel=cancel)
+                               series.voltage, settings.recon, log=on_line, cancel=cancel, ctf=ctf_rec)
     except Exception as e:
         log.exception(f"Reconstruction FAILED: {e}")
         rec = {"status": "failed", "error": f"{type(e).__name__}: {e}", "preset": settings.recon.preset}
     finally:
         _close_logger(log)
+    if rec["status"] == "complete" and settings.recon.deconvolve:
+        progress(-1, total_steps, "Deconvolving the tomogram")
+        deconvolve_series(series, settings, out_root, rec, log_callback)
+        try:
+            (Path(rec["recon_dir"]) / "pyprep_recon.json").write_text(json.dumps(rec, indent=1))
+        except OSError:
+            pass
     # Keep the series record in sync so the Results page can find the tomogram.
     j = result_json_path(series, out_dir)
     try:
@@ -502,6 +636,25 @@ def reconstruct_series(series: TiltSeries, settings: ProcessingSettings, out_roo
     return rec
 
 
+def _ensure_deconvolved(series: TiltSeries, settings: ProcessingSettings, out_root, log_callback=None) -> None:
+    j = recon_dir_for(series, settings, out_root) / "pyprep_recon.json"
+    try:
+        rec = json.loads(j.read_text())
+    except (OSError, ValueError):
+        return
+    if rec.get("deconvolved") and Path(rec["deconvolved"]).exists():
+        return
+    if deconvolve_series(series, settings, out_root, rec, log_callback) is not None:
+        j.write_text(json.dumps(rec, indent=1))
+        sj = result_json_path(series, Path(out_root) / series.name)
+        try:
+            info = json.loads(sj.read_text())
+            info["reconstruction"] = {k: v for k, v in rec.items() if k != "directives"}
+            sj.write_text(json.dumps(info, indent=1))
+        except (OSError, ValueError):
+            pass
+
+
 def run_series(series: TiltSeries, settings: ProcessingSettings, out_root,
                progress: ProgressFn | None = None, cancel: threading.Event | None = None,
                log_callback: Callable[[str], None] | None = None, force_recon: bool = False) -> dict:
@@ -516,6 +669,8 @@ def run_series(series: TiltSeries, settings: ProcessingSettings, out_root,
     if settings.skip_existing and is_complete(series, settings, out_root):
         say(f"{series.name}: stacks already complete - skipped")
         result["stacks"] = "skipped"
+        if settings.ctf.enabled:
+            ensure_ctf(series, settings, out_root, log_callback, cancel)
     else:
         rec = process_series(series, settings, out_root, progress, cancel, log_callback)
         result["stacks"] = rec["status"]
@@ -525,6 +680,8 @@ def run_series(series: TiltSeries, settings: ProcessingSettings, out_root,
         elif settings.skip_existing and not force_recon and recon_complete(series, settings, out_root):
             say(f"{series.name}: tomogram already complete - skipped")
             result["recon"] = "skipped"
+            if settings.recon.deconvolve:
+                _ensure_deconvolved(series, settings, out_root, log_callback)
         else:
             result["recon"] = reconstruct_series(series, settings, out_root, progress, cancel,
                                                  log_callback)["status"]

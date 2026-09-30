@@ -15,6 +15,8 @@ For every tilt series, pyPrep writes a folder `<output>\<series>\`:
     ├── TS_01_bin4.rawtlt / .mrc.mdoc
     ├── TS_01_EVN*.mrc, TS_01_ODD*.mrc  even/odd half-sums        (if selected)
     ├── TS_01_DW*.mrc                   dose-weighted sums        (if selected)
+    ├── TS_01.defocus                   per-tilt defocus for IMOD (CTF estimation)
+    ├── TS_01_ctf.npz                   spectra and fitted CTF models (Results page plot)
     ├── TS_01_motion.csv                per-frame shifts of every tilt
     ├── TS_01_pyprep.json               full record: settings, per-tilt results, outputs, reconstruction
     ├── TS_01_pyprep.log                log of alignment and reconstruction
@@ -22,6 +24,7 @@ For every tilt series, pyPrep writes a folder `<output>\<series>\`:
     └── imod_bin4\                      batchruntomo / etomo project (if reconstruction is on)
         ├── TS_01.edf                   open this in etomo
         ├── TS_01_rec.mrc               final tomogram (trimmed, rotated so Z is the slice axis)
+        ├── TS_01_rec_deconv.mrc        deconvolved copy (if deconvolution is on)
         ├── TS_01_full_rec.mrc          untrimmed reconstruction
         ├── pyprep_batchruntomo.adoc    the directives used
         ├── pyprep_recon.json           reconstruction record
@@ -78,6 +81,24 @@ size), missing tilts and — after reconstruction — the reconstruction status 
 tomogram path. The Results page
 and the *skip completed steps* option read it.
 
+## CTF (`.defocus`, `_ctf.npz`)
+
+- `<series>.defocus`: the defocus of every view in IMOD's format (nm,
+  underfocus positive, views numbered from 1), for ctfphaseflip or
+  ctfplotter.
+  - If the defocus gradient runs opposite to IMOD's convention, the file starts
+    with the version-3 header `16 0 0. 0. 0 3`. Use `-invert` with IMOD's
+    programs then.
+  - Otherwise the first line ends with the version number `2`.
+- `<series>_ctf.npz`: for each tilt, the flattened spectrum and the fitted
+  model, as plotted on the Results page (numpy arrays `k`, `data`, `model`,
+  `angles`, `defocus_um`).
+- The `ctf` entry in `_pyprep.json` holds:
+  - per-tilt defocus, fit score and fit resolution;
+  - the series defocus (`defocus_um`, used for deconvolution);
+  - the handedness and its confidence;
+  - the specimen tilt offset (`tilt_offset_deg`).
+
 ## Reconstruction folder (`imod_bin<N>`)
 
 A complete etomo project created by batchruntomo from a copy of the binned
@@ -86,7 +107,12 @@ change or redo any step. The final tomogram is `<series>_rec.mrc`. It is
 trimmed and rotated around X so that sections are Z slices (IMOD's default for
 batchruntomo).
 
-pyPrep changes this folder only when you use *Position tomogram*, which adds:
+With CTF correction, `<series>.defocus` is copied in, re-labelled with the
+aligned tilt angles, and used by `ctfcorrection.com`. With deconvolution,
+`<series>_rec_deconv.mrc` is written next to `<series>_rec.mrc` (float32,
+same pixel size); its parameters are in `pyprep_recon.json` under `deconv`.
+
+*Position tomogram* adds:
 
 | File | Contents |
 |---|---|

@@ -152,10 +152,17 @@ class ResultsPanel(QWidget):
         self.drift_plot.addItem(self.expected_curve)
         self.drift_marker = pg.InfiniteLine(angle=90, pen=pg.mkPen(theme.WARNING, width=1))
         self.drift_plot.addItem(self.drift_marker)
+        self.ctf_data_curve = pg.PlotDataItem(pen=pg.mkPen(theme.TEXT_DIM, width=1))
+        self.ctf_model_curve = pg.PlotDataItem(pen=pg.mkPen(theme.ACCENT_Hi, width=2))
+        self.drift_plot.addItem(self.ctf_data_curve)
+        self.drift_plot.addItem(self.ctf_model_curve)
+        self._ctf, self._ctf_curves, self._ctf_index = None, None, 0
         self.plot_kind = QComboBox()
         self.plot_kind.addItem("Drift per tilt", "drift")
         self.plot_kind.addItem("Intensity per tilt (QC)", "intensity")
         self.plot_kind.addItem("Alignment score per tilt", "score")
+        self.plot_kind.addItem("Defocus per tilt (CTF)", "defocus")
+        self.plot_kind.addItem("CTF fit of the current tilt", "ctffit")
         self.plot_kind.setToolTip("Red points are tilts flagged by quality control.")
         self.plot_kind.currentIndexChanged.connect(self._draw_series_plot)
         self.traj_plot = pg.PlotWidget(title="Frame trajectory")
@@ -212,6 +219,16 @@ class ResultsPanel(QWidget):
         self._shifts = [np.asarray(t["shifts_px"]) for t in tilts]
         self._tilt_records = tilts
         self._qc_fit = (rec.get("qc") or {}).get("intensity_fit")
+        self._ctf = rec.get("ctf")
+        self._ctf_curves = None
+        npz = out_dir / f"{rec.get('series', '')}_ctf.npz"
+        if self._ctf and npz.exists():
+            try:
+                with np.load(npz) as z:
+                    self._ctf_curves = (z["k"], z["data"], z["model"])
+            except (OSError, ValueError, KeyError):
+                pass
+        self._ctf_index = int(np.argmin(np.abs(self._angles))) if self._angles else 0
         self._draw_series_plot()
         self.stack_combo.blockSignals(True)
         self.stack_combo.clear()
@@ -224,6 +241,10 @@ class ResultsPanel(QWidget):
                     rec["reconstruction"] = recon
                 except (OSError, ValueError):
                     pass
+        deconv = recon.get("deconvolved")
+        if deconv and Path(deconv).exists():
+            self.stack_combo.addItem(f"Tomogram, deconvolved   {Path(deconv).name}   ({Path(deconv).parent.name})",
+                                     ("tomo", deconv))
         tomo = recon.get("tomogram")
         if tomo and Path(tomo).exists():
             self.stack_combo.addItem(f"Tomogram   {Path(tomo).name}   ({Path(tomo).parent.name})", ("tomo", tomo))
@@ -245,6 +266,8 @@ class ResultsPanel(QWidget):
             color = theme.OK if recon.get("status") == "complete" else theme.DANGER
             parts.append(f"<span style='color:{color}'>tomogram {recon.get('status')}</span>"
                          + (f" ({recon.get('preset')}, {recon.get('seconds', 0):.0f} s)" if recon.get("seconds") else ""))
+        if self._ctf:
+            parts.append(f"defocus {self._ctf.get('defocus_um', 0):.2f} µm")
         if rec.get("error"):
             parts.append(f"<span style='color:{theme.DANGER}'>{rec['error']}</span>")
         self.title.setText(" &nbsp;·&nbsp; ".join(parts))
@@ -332,15 +355,29 @@ class ResultsPanel(QWidget):
                                 symbolBrush=theme.WARNING, symbolPen=None)
         self.traj_plot.setTitle(f"Frame trajectory at {self._angles[ind]:+.1f} deg (square = first frame)")
         self.drift_marker.setValue(self._angles[ind])
+        self._ctf_index = ind
+        if self.plot_kind.currentData() == "ctffit":
+            self._draw_series_plot()
 
     def _draw_series_plot(self):
         """Drift, QC intensity or alignment score against tilt angle; flagged tilts in red."""
         tilts = getattr(self, "_tilt_records", None) or []
         kind = self.plot_kind.currentData()
         self.expected_curve.setData([], [])
+        self.ctf_data_curve.setData([], [])
+        self.ctf_model_curve.setData([], [])
+        self.drift_plot.setTitle(None)
+        fit_view = kind == "ctffit"
+        self.drift_marker.setVisible(not fit_view)
+        self.drift_scatter.setVisible(not fit_view)
+        self.drift_plot.setLabel("bottom", "spatial frequency (1/Å)" if fit_view else "tilt angle (°)")
         if not tilts:
             return
+        if fit_view:
+            self._draw_ctf_fit()
+            return
         ang = np.array([t["angle"] for t in tilts])
+        ctf_tilts = (self._ctf or {}).get("tilts") or []
         if kind == "intensity" and all("mean_counts" in t for t in tilts):
             y = np.array([t["mean_counts"] / t.get("exposure", 1.0) for t in tilts])
             label = "counts per second"
@@ -351,6 +388,19 @@ class ResultsPanel(QWidget):
         elif kind == "score":
             y = np.array([float(np.mean(t["scores"])) for t in tilts])
             label = "alignment score"
+        elif kind == "defocus":
+            if len(ctf_tilts) != len(tilts):
+                self.drift_scatter.setData([], [])
+                self.drift_plot.setLabel("left", "no CTF estimate for this series")
+                return
+            y = np.array([c["defocus_um"] for c in ctf_tilts])
+            res = np.array([c["resolution_A"] for c in ctf_tilts])
+            poor = res > 1.5 * np.nanmedian(res)
+            brushes = [pg.mkBrush(theme.DANGER if b else theme.ACCENT) for b in poor]
+            self.drift_scatter.setData(ang, y, brush=brushes)
+            self.drift_plot.setLabel("left", "defocus (µm)")
+            self.drift_plot.setTitle("red: CTF fit resolution much worse than the series median")
+            return
         else:
             y = np.array([t["drift_A"] for t in tilts])
             label = "total drift (Å)"
@@ -358,6 +408,22 @@ class ResultsPanel(QWidget):
         brushes = [pg.mkBrush(theme.DANGER if b else theme.ACCENT) for b in bad]
         self.drift_scatter.setData(ang, y, brush=brushes)
         self.drift_plot.setLabel("left", label)
+
+    def _draw_ctf_fit(self):
+        """Tile-averaged, background-flattened spectrum of one tilt with the fitted CTF model."""
+        if self._ctf_curves is None:
+            self.drift_plot.setLabel("left", "no CTF estimate for this series")
+            return
+        k, data, model = self._ctf_curves
+        i = min(max(self._ctf_index, 0), len(data) - 1)
+        self.ctf_data_curve.setData(k, data[i])
+        self.ctf_model_curve.setData(k, model[i])
+        self.drift_plot.setLabel("left", "flattened amplitude")
+        t = ((self._ctf or {}).get("tilts") or [{}] * len(data))[i]
+        if t:
+            self.drift_plot.setTitle(f"{t['angle']:+.1f}°: defocus {t['defocus_um']:.2f} µm, "
+                                     f"fit to {t['resolution_A']:.1f} Å (teal = model)")
+        self.drift_plot.autoRange()
 
     def _drift_clicked(self, _item, points, *args):
         if points is not None and len(points) and self._showing_tilts:

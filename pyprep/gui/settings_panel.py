@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBo
                                QWidget)
 
 from .. import gpu, imod
+from ..ctf import CtfSettings
 from ..imod import ReconSettings
 from ..motion import MotionSettings
 from ..settings import (InputSettings, OutputSettings, ProcessingSettings, delete_preset, list_presets,
@@ -181,6 +182,40 @@ class SettingsForms(QObject):
         f.addRow("Tolerance", self.tolerance)
         f.addRow("Group frames", self.group)
         f.addRow("", self.mask_axes)
+        lay.addWidget(c)
+
+        c, v, f = _card_with_form(
+            "CTF estimation", "Defocus of every tilt, measured on the GPU from its aligned sum while the series "
+                              "is processed (tilt-aware: the defocus gradient across tilted images is fitted, "
+                              "including its direction). Used for CTF correction and deconvolution on the "
+                              "Reconstruction page, and written as <series>.defocus for IMOD.")
+        self.ctf_enabled = QCheckBox("Estimate the CTF of every tilt")
+        self.ctf_enabled.setStyleSheet("font-weight: 700;")
+        self.ctf_cs = _dspin(0, 10, 0.1, 2, " mm", "Spherical aberration of the objective lens (Krios: 2.7).")
+        self.ctf_amp = _dspin(0, 0.5, 0.01, 3, "", "Amplitude contrast (0.07 for cryo samples).")
+        rng = QHBoxLayout()
+        self.ctf_lo = _dspin(10, 200, 1, 0, " Å", "Low-resolution end of the fitted range.")
+        self.ctf_hi = _dspin(3, 50, 0.5, 1, " Å", "High-resolution end (limited to 2.2 x the pixel size).")
+        for w in (self.ctf_lo, self.ctf_hi):
+            w.setMinimumWidth(120)
+        rng.addWidget(self.ctf_lo)
+        rng.addWidget(QLabel("to"))
+        rng.addWidget(self.ctf_hi)
+        rng.addStretch()
+        drng = QHBoxLayout()
+        self.def_min = _dspin(0.1, 20, 0.1, 1, " µm", "Smallest defocus searched (underfocus).")
+        self.def_max = _dspin(0.5, 30, 0.5, 1, " µm", "Largest defocus searched (underfocus).")
+        for w in (self.def_min, self.def_max):
+            w.setMinimumWidth(120)
+        drng.addWidget(self.def_min)
+        drng.addWidget(QLabel("to"))
+        drng.addWidget(self.def_max)
+        drng.addStretch()
+        v.insertWidget(2, self.ctf_enabled)
+        f.addRow("Spherical aberration", self.ctf_cs)
+        f.addRow("Amplitude contrast", self.ctf_amp)
+        f.addRow("Fit range", rng)
+        f.addRow("Defocus search", drng)
         lay.addWidget(c)
 
         c, v, f = _card_with_form(
@@ -378,6 +413,25 @@ class SettingsForms(QObject):
         self.positioning.currentIndexChanged.connect(self._positioning_changed)
         lay.addWidget(c)
 
+        c, v, f = _card_with_form(
+            "CTF correction and deconvolution",
+            "Both use the defocus pyPrep measured for each tilt (Frame alignment page, CTF estimation).")
+        self.ctf_correct = QCheckBox("Correct the CTF (IMOD ctfphaseflip with pyPrep's per-tilt defocus)")
+        self.ctf_correct.setToolTip("Phase-flips the aligned stack before back-projection. At bin 4 it changes\n"
+                                    "little unless the defocus is large; it matters for bin 1-2 tomograms.")
+        self.deconvolve = QCheckBox("Also write a deconvolved tomogram   (<series>_rec_deconv.mrc)")
+        self.deconvolve.setToolTip("Wiener-like filter with the CTF: stronger low-resolution contrast and less\n"
+                                   "noise, for viewing and segmentation. The normal tomogram is kept.")
+        self.deconv_strength = _dspin(0.1, 3, 0.1, 2, "", "Higher = stronger contrast boost (assumed SNR 10^(3 x strength)).")
+        self.deconv_falloff = _dspin(0.1, 5, 0.1, 2, "", "Higher = SNR assumed to fall faster with resolution (smoother).")
+        v.insertWidget(2, self.ctf_correct)
+        v.insertWidget(3, self.deconvolve)
+        f.addRow("Deconvolution strength", self.deconv_strength)
+        f.addRow("SNR falloff", self.deconv_falloff)
+        self.deconvolve.toggled.connect(lambda on: (self.deconv_strength.setEnabled(on),
+                                                    self.deconv_falloff.setEnabled(on)))
+        lay.addWidget(c)
+
         c, v, f = _card_with_form("Advanced", "Extra batchruntomo directives, one 'key = value' per line. "
                                               "They override the preset (see IMOD's directives.csv).")
         self.extra = QPlainTextEdit()
@@ -448,7 +502,15 @@ class SettingsForms(QObject):
                           positioning_thickness_nm=self.pos_thickness.value(),
                           thickness_nm=self.thickness.value(), sirt_like_iterations=self.sirt.value(),
                           remove_xrays=self.remove_xrays.isChecked(), cpus=self.cpus.value(),
-                          use_gpu=self.imod_gpu.isChecked(), extra_directives=self.extra.toPlainText())
+                          use_gpu=self.imod_gpu.isChecked(), ctf_correct=self.ctf_correct.isChecked(),
+                          deconvolve=self.deconvolve.isChecked(), deconv_strength=self.deconv_strength.value(),
+                          deconv_falloff=self.deconv_falloff.value(), extra_directives=self.extra.toPlainText())
+        c = CtfSettings(enabled=self.ctf_enabled.isChecked(), cs_mm=self.ctf_cs.value(),
+                        amplitude_contrast=self.ctf_amp.value(),
+                        min_res_A=max(self.ctf_lo.value(), self.ctf_hi.value()),
+                        max_res_A=min(self.ctf_lo.value(), self.ctf_hi.value()),
+                        defocus_min_um=min(self.def_min.value(), self.def_max.value()),
+                        defocus_max_um=max(self.def_min.value(), self.def_max.value()))
         by_group = self.eer_mode.currentData() == "group"
         i = InputSettings(eer_fractions=self._eer_vals["fractions"] if by_group else self.eer_value.value(),
                           eer_group=self.eer_value.value() if by_group else 0,
@@ -458,7 +520,7 @@ class SettingsForms(QObject):
                           gain_flip=self.gain_flip.currentData())
         kind, idx = self.device.currentData()
         dose = self.default_dose.value()
-        return ProcessingSettings(input=i, motion=m, output=o, recon=r, use_gpu=(kind == "gpu"), gpu_id=idx,
+        return ProcessingSettings(input=i, motion=m, output=o, recon=r, ctf=c, use_gpu=(kind == "gpu"), gpu_id=idx,
                                   skip_existing=self.skip_existing.isChecked(),
                                   default_dose=dose if dose > 0 else None)
 
@@ -513,6 +575,20 @@ class SettingsForms(QObject):
         self.cpus.setValue(min(r.cpus, self.cpus.maximum()))
         self.imod_gpu.setChecked(r.use_gpu)
         self.extra.setPlainText(r.extra_directives)
+        self.ctf_correct.setChecked(r.ctf_correct)
+        self.deconvolve.setChecked(r.deconvolve)
+        self.deconv_strength.setValue(r.deconv_strength)
+        self.deconv_falloff.setValue(r.deconv_falloff)
+        self.deconv_strength.setEnabled(r.deconvolve)
+        self.deconv_falloff.setEnabled(r.deconvolve)
+        c = s.ctf
+        self.ctf_enabled.setChecked(c.enabled)
+        self.ctf_cs.setValue(c.cs_mm)
+        self.ctf_amp.setValue(c.amplitude_contrast)
+        self.ctf_lo.setValue(c.min_res_A)
+        self.ctf_hi.setValue(c.max_res_A)
+        self.def_min.setValue(c.defocus_min_um)
+        self.def_max.setValue(c.defocus_max_um)
         self._positioning_changed()
 
     def validate(self) -> str | None:

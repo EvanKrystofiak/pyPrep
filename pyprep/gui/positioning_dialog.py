@@ -222,6 +222,7 @@ class PositioningDialog(QDialog):
 
         def work():
             geom = P.apply_positioning(self.recon_dir, self.root, c, margin_px, log)
+            self._refresh_deconv(log)
             self._record(geom, c)
             return geom
         self._run("apply", work)
@@ -235,17 +236,26 @@ class PositioningDialog(QDialog):
 
         def work():
             P.restore_original(self.recon_dir, log)
+            self._refresh_deconv(log)
             self._record(None, None)
         self._run("restore", work)
+
+    def _refresh_deconv(self, log):
+        """The deconvolved tomogram must follow the rebuilt one."""
+        from .. import deconv
+        try:
+            deconv.refresh(self.recon_dir, log=log)
+        except Exception as e:
+            log(f"Deconvolution not updated: {e}")
 
     def _record(self, geom, corr):
         """Note the positioning in pyprep_recon.json and refresh the gallery thumbnail."""
         j = self.recon_dir / "pyprep_recon.json"
         try:
-            rec = json.loads(j.read_text())
+            rec = json.loads(j.read_text(encoding="utf-8"))
             rec["positioning"] = None if geom is None else {"tilt_com": geom, "margin_nm": self.margin.value(),
                                                            "specimen_px": corr.thickness_px}
-            j.write_text(json.dumps(rec, indent=1))
+            j.write_text(json.dumps(rec, indent=1), encoding="utf-8")
         except (OSError, ValueError):
             pass
         try:

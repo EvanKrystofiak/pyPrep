@@ -1,12 +1,23 @@
-"""Command-line interface: ``pyprep scan`` and ``pyprep run``."""
+"""Command-line interface: ``pyprep scan``, ``run``, ``ctf``, ``deconv``, ``gallery``, ``export``."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from . import __version__
+from .settings import ProcessingSettings
+
+
+def add_ctf_args(p) -> None:
+    p.add_argument("--cs", type=float, help="spherical aberration in mm (default 2.7)")
+    p.add_argument("--amp-contrast", type=float, help="amplitude contrast (default 0.07)")
+    p.add_argument("--ctf-range", type=float, nargs=2, metavar=("LOW_A", "HIGH_A"),
+                   help="CTF fit range in Angstrom (default 30 8)")
+    p.add_argument("--defocus-range", type=float, nargs=2, metavar=("MIN_UM", "MAX_UM"),
+                   help="defocus search range in micrometres (default 0.5 12)")
 
 
 def _collect(inputs, recursive, frames_dir, default_dose):
@@ -43,7 +54,6 @@ def cmd_scan(args) -> int:
 
 def cmd_run(args) -> int:
     from .pipeline import run_series
-    from .settings import ProcessingSettings
 
     settings = ProcessingSettings.load(args.settings) if args.settings else ProcessingSettings()
     o, m = settings.output, settings.motion
@@ -97,6 +107,15 @@ def cmd_run(args) -> int:
         r.thickness_nm = args.thickness
     if args.fixed_thickness:
         r.positioning = "fixed"
+    _apply_ctf_args(settings, args)
+    if args.no_ctf_correct:
+        r.ctf_correct = False
+    if args.no_deconv:
+        r.deconvolve = False
+    if args.deconv_strength is not None:
+        r.deconv_strength = args.deconv_strength
+    if args.deconv_falloff is not None:
+        r.deconv_falloff = args.deconv_falloff
 
     series = _collect(args.inputs, args.recursive, settings.frames_dir, settings.default_dose)
     if not series:
@@ -135,6 +154,66 @@ def cmd_run(args) -> int:
             failures += 1
             print(f"\r    FAILED: {e}")
     return 1 if failures else 0
+
+
+def _apply_ctf_args(settings, args) -> None:
+    c = settings.ctf
+    if getattr(args, "no_ctf", False):
+        c.enabled = False
+    if args.cs is not None:
+        c.cs_mm = args.cs
+    if args.amp_contrast is not None:
+        c.amplitude_contrast = args.amp_contrast
+    if args.ctf_range:
+        c.min_res_A, c.max_res_A = max(args.ctf_range), min(args.ctf_range)
+    if args.defocus_range:
+        c.defocus_min_um, c.defocus_max_um = min(args.defocus_range), max(args.defocus_range)
+
+
+def cmd_ctf(args) -> int:
+    from .pipeline import ensure_ctf, result_json_path
+    settings = ProcessingSettings.load(args.settings) if args.settings else ProcessingSettings()
+    if args.frames_dir:
+        settings.frames_dir = args.frames_dir
+    if args.cpu:
+        settings.use_gpu = False
+    _apply_ctf_args(settings, args)
+    settings.ctf.enabled = True
+    series = _collect(args.inputs, args.recursive, settings.frames_dir, settings.default_dose)
+    out_root = Path(args.output)
+    failures = 0
+    for s in series:
+        j = result_json_path(s, out_root / s.name)
+        if not j.exists():
+            print(f"{s.name}: no pyPrep results in {out_root / s.name}")
+            failures += 1
+            continue
+        info = json.loads(j.read_text())
+        info.pop("ctf", None)                        # re-estimate
+        j.write_text(json.dumps(info, indent=1))
+        rec = ensure_ctf(s, settings, out_root, log_callback=None if args.quiet else print)
+        if rec is None:
+            failures += 1
+            continue
+        print(f"{s.name}: defocus {rec['defocus_um']:.2f} um, handedness "
+              f"{'IMOD' if rec['handedness'] > 0 else 'inverted'} -> {rec['defocus_file']}")
+    return 1 if failures else 0
+
+
+def cmd_deconv(args) -> int:
+    from . import deconv, gpu
+    from .io import mrc
+    src = Path(args.input)
+    pixel = args.pixel or mrc.read_header(src).pixel_size
+    if not pixel:
+        print("The MRC header has no pixel size; give --pixel")
+        return 1
+    p = deconv.DeconvParams(pixel_A=pixel, defocus_um=args.defocus, kv=args.kv, cs_mm=args.cs,
+                            amplitude=args.amp_contrast, strength=args.strength, falloff=args.falloff,
+                            highpass_nyquist=args.highpass, phase_flipped=args.phase_flipped)
+    dev = gpu.select_device(not args.cpu)
+    deconv.deconvolve_file(src, Path(args.output) if args.output else deconv.deconv_name(src), p, dev, print)
+    return 0
 
 
 def cmd_export(args) -> int:
@@ -200,6 +279,12 @@ def main(argv=None) -> int:
     p.add_argument("--recon-bin", type=int, help="binning of the stack to reconstruct (default 4)")
     p.add_argument("--thickness", type=float, help="reconstruction (fallback) thickness in nm")
     p.add_argument("--fixed-thickness", action="store_true", help="skip IMOD positioning, use --thickness")
+    p.add_argument("--no-ctf", action="store_true", help="skip per-tilt CTF estimation")
+    add_ctf_args(p)
+    p.add_argument("--no-ctf-correct", action="store_true", help="do not phase-flip (IMOD ctfphaseflip)")
+    p.add_argument("--no-deconv", action="store_true", help="do not write a deconvolved tomogram")
+    p.add_argument("--deconv-strength", type=float, help="deconvolution strength (default 1.0)")
+    p.add_argument("--deconv-falloff", type=float, help="deconvolution SNR falloff (default 1.0)")
     p.add_argument("--force", action="store_true", help="reprocess series that are already complete")
     p.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_run)
@@ -216,6 +301,30 @@ def main(argv=None) -> int:
     p.add_argument("--bin", type=int, default=1, help="block-bin by this factor")
     p.add_argument("--bits16", action="store_true", help="16-bit instead of 8-bit")
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("ctf", help="(re-)estimate per-tilt CTF of processed series (needs the bin 1 stack)")
+    common(p)
+    p.add_argument("-o", "--output", required=True, help="pyPrep output folder used for 'run'")
+    p.add_argument("--settings", help="JSON settings file")
+    p.add_argument("--cpu", action="store_true", help="do not use the GPU")
+    add_ctf_args(p)
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.set_defaults(func=cmd_ctf)
+
+    p = sub.add_parser("deconv", help="deconvolve a tomogram (Wiener-like filter with the CTF)")
+    p.add_argument("input", help="tomogram (MRC)")
+    p.add_argument("--defocus", type=float, required=True, help="defocus in micrometres (underfocus positive)")
+    p.add_argument("-o", "--output", help="output MRC (default: <input>_deconv.mrc)")
+    p.add_argument("--pixel", type=float, help="pixel size in A (default: from the MRC header)")
+    p.add_argument("--kv", type=float, default=300.0)
+    p.add_argument("--cs", type=float, default=2.7)
+    p.add_argument("--amp-contrast", type=float, default=0.07)
+    p.add_argument("--strength", type=float, default=1.0)
+    p.add_argument("--falloff", type=float, default=1.0)
+    p.add_argument("--highpass", type=float, default=0.02, help="high-pass cut-on, fraction of Nyquist")
+    p.add_argument("--phase-flipped", action="store_true", help="the tilt series was CTF phase-flipped")
+    p.add_argument("--cpu", action="store_true", help="do not use the GPU")
+    p.set_defaults(func=cmd_deconv)
 
     args = ap.parse_args(argv)
     return args.func(args)

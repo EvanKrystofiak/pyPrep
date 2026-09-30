@@ -10,9 +10,13 @@ and reconstruction uses IMOD.
    (Tomo5 / SerialEM)        (per tilt)     (MRC/TIFF/EER)          (GPU)                    sorted by angle
                                                                                               + .rawtlt + .mdoc
                                                                                                     │
-                                                                           IMOD batchruntomo ◄──────┘ (bin 4)
-                                                                                    │
-                                                                                tomogram
+                                                     per-tilt CTF (GPU) ◄──────── sums     │
+                                                                  │ .defocus                 │
+                                                                  ▼                          │
+                                                          IMOD batchruntomo ◄────────────────┘ (bin 4)
+                                                          (ctfphaseflip)
+                                                                  │
+                                                        tomogram ──► deconvolved tomogram
 ```
 
 ## Reading the data
@@ -81,6 +85,78 @@ within about 0.03 px.
   (255 for 8-bit) is reported per series.
 - Stacks and tomograms record the tilts they contain (`used_tilts`); changing
   exclusions makes them out of date, so they are rebuilt on the next run.
+
+## CTF estimation
+
+`pyprep/ctf.py` was written for pyPrep. It borrows ideas from CTFFIND4 and
+IMOD ctfplotter, but no code.
+
+- **Spectra.** Each non-dose-weighted tilt sum is cut into 512-px tiles that
+  overlap by half. The data are first Fourier-binned if the pixel is much
+  smaller than the fit range needs. Each tile's power spectrum is rotationally
+  averaged on the GPU. The kx = 0 and ky = 0 lines are left out, because
+  detector fixed-pattern noise and tile-edge leakage sit there. Tiles much
+  darker than the median (grid bars) are skipped.
+- **Flattening.** In the fit range (30–8 Å) each tile's amplitude profile has
+  a smooth background removed: it is projected onto the complement of a
+  4th-order polynomial in *k*. It is then divided by a smooth envelope, so the
+  weak high-resolution rings count as much as the strong low ones.
+- **Tilt-aware fit.** A tile at distance *u* from the tilt axis sits at defocus
+  *d₀ + s·u·tan(θ + δ)*. For each tilt, the central defocus *d₀* is the value
+  that maximises the mean correlation between every tile's profile and its own
+  model −cos 2(χ + w), where w = asin(amplitude contrast). This is a coarse
+  50 nm grid over 0.5–12 µm, refined in 20 nm steps with a parabolic peak.
+- **Handedness and specimen tilt.** The tilts beyond 20° fix two values for
+  the whole series:
+  - the direction *s* of the gradient;
+  - the offset *δ* between the stage tilt and the actual specimen tilt (a
+    pretilted lamella or a bent grid), by a joint search over ±15°.
+
+  *s* = +1 is IMOD's convention: in the aligned stack, with the tilt axis
+  vertical, the right side is more underfocused at positive tilt angles.
+  Otherwise ctfphaseflip needs `InvertTiltAngles`, which pyPrep sets.
+- **Fit resolution.** The tiles' profiles are rescaled in *k* to the central
+  defocus and averaged. The fit resolution is where the local correlation with
+  the model (±1 ring) drops below 0.3.
+
+**Validation on the K3 test series** (46 tilts, 3.3 Å/px, target −2 µm):
+
+- IMOD ctfplotter (auto-fit per view, `-invert`) and pyPrep agree to 36 nm RMS
+  (mean difference −10 nm).
+- Without `-invert`, ctfplotter's fits drift with tilt angle and fail on two
+  views. pyPrep chose the inverted handedness in 26 of 26 high tilts.
+- pyPrep's specimen tilt offset was −7.6°. tiltalign independently found the
+  same offset between the raw and aligned tilt angles.
+- On synthetic images with a known gradient, defocus is recovered to within
+  a few nm and the handedness and offset correctly.
+
+**CTF correction in batchruntomo.** When CTF correction is on, pyPrep:
+
+1. copies `<series>.defocus` into the IMOD project and sets `correctCTF`
+   (with `InvertTiltAngles` when the handedness is inverted);
+2. runs batchruntomo up to CTF plotting (step 9);
+3. re-labels the defocus file with the tilt angles tiltalign refined
+   (`<series>.tlt`), because ctfphaseflip matches defocus entries to views
+   by angle;
+4. continues from step 10.
+
+## Deconvolution
+
+`pyprep/deconv.py` applies a Wiener-like filter to the finished tomogram,
+following the approach Warp introduced for tomograms. The filter is
+*CTF(f) / (CTF(f)² + 1/SNR(f))*, where:
+
+- SNR(f) = 10^(3·strength) · exp(−100·falloff·f / pixel) · (1 − cos(π·min(1, f/0.02))),
+  with *f* as a fraction of Nyquist;
+- the CTF is evaluated at the series' defocus, which is the median over
+  well-fitted tilts within ±30°;
+- |CTF| is used when the stack was phase-flipped.
+
+The CTF sign keeps low-resolution contrast, so protein stays dark. The filter
+is radially symmetric in 3D and applied with one FFT of the volume on the GPU,
+with a fallback to the CPU when memory runs out. The output is scaled to the
+input's mean and standard deviation. After *Position tomogram* rebuilds a
+tomogram, the deconvolved copy is re-made with the same parameters.
 
 ## Dose weighting
 
@@ -238,3 +314,9 @@ full batch was 77 ms.
   three-dimensional image data using IMOD. *J Struct Biol* 116:71.
 - Mastronarde & Held (2017) Automated tilt series alignment and tomographic
   reconstruction in IMOD. *J Struct Biol* 197:102.
+- Rohou & Grigorieff (2015) CTFFIND4: Fast and accurate defocus estimation
+  from electron micrographs. *J Struct Biol* 192:216.
+- Xiong, Morphew, Mastronarde & McIntosh (2009) CTF determination and
+  correction for low dose tomographic tilt series. *J Struct Biol* 168:378.
+- Tegunov & Cramer (2019) Real-time cryo-electron microscopy data preprocessing
+  with Warp. *Nat Methods* 16:1146.

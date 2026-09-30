@@ -106,12 +106,51 @@ The exit code is 0 if every series succeeded, 1 otherwise.
 | `--thickness NM` | 200 | fallback thickness (auto positioning) or fixed thickness, in nm |
 | `--fixed-thickness` | | skip IMOD positioning and use `--thickness` |
 
+**CTF and deconvolution**
+
+| Option | Default | |
+|---|---|---|
+| `--no-ctf` | | skip per-tilt CTF estimation |
+| `--cs MM` | 2.7 | spherical aberration |
+| `--amp-contrast A` | 0.07 | amplitude contrast |
+| `--ctf-range LOW HIGH` | `30 8` | fit range in Å |
+| `--defocus-range MIN MAX` | `0.5 12` | defocus search range in µm |
+| `--no-ctf-correct` | | do not phase-flip in IMOD |
+| `--no-deconv` | | do not write the deconvolved tomogram |
+| `--deconv-strength S` | 1.0 | deconvolution strength |
+| `--deconv-falloff F` | 1.0 | SNR falloff |
+
 **Other**
 
 | Option | |
 |---|---|
 | `--force` | reprocess series that are already complete |
 | `-q`, `--quiet` | print only progress and a summary per series |
+
+## `pyprep ctf` — (re-)estimate the CTF of processed series
+
+```bat
+env\python.exe -m pyprep ctf "D:\Sessions\2026-09-30" -o "D:\Sessions\2026-09-30\pyPrep"
+```
+
+Re-estimates the per-tilt defocus from each series' bin 1 aligned stack, with
+the same inputs as `run` and the CTF options above. Use it for series
+processed before CTF estimation existed, or with a different fit range. It
+writes `<series>.defocus` and `_ctf.npz` and updates `_pyprep.json`. To apply
+the result, redo the reconstruction: *Redo reconstruction* on the Results page,
+or `run --force`.
+
+## `pyprep deconv` — deconvolve any tomogram
+
+```bat
+env\python.exe -m pyprep deconv "out\TS_01\imod_bin4\TS_01_rec.mrc" --defocus 2.5
+env\python.exe -m pyprep deconv tomo.mrc --defocus 3.1 --pixel 10.2 --strength 0.8 --phase-flipped
+```
+
+Writes `<input>_deconv.mrc` (or `-o FILE`). The pixel size is read from the
+MRC header unless `--pixel` is given. `--kv`, `--cs`, `--amp-contrast`,
+`--strength`, `--falloff` and `--highpass` (fraction of Nyquist) set the
+filter. `--phase-flipped` tells it the tilt series was CTF-corrected.
 
 ## `pyprep gallery` — thumbnails and contact sheet
 

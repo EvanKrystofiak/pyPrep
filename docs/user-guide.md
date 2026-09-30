@@ -128,6 +128,26 @@ EER data to check the gain reference.
 | Group frames | 1 | Sum this many consecutive frames before aligning (for very noisy movies); per-frame shifts are interpolated. |
 | Ignore detector fixed-pattern noise | on | Camera row/column offsets are identical in every frame and pull all shifts to zero; pyPrep ignores the Fourier axes where they live. Leave on. |
 
+### CTF estimation
+
+pyPrep measures the defocus of every tilt on the GPU, from the tilt's aligned
+sum, while the series is processed. This adds about 15 s per series. The fit
+takes into account that tilted images are not at one defocus. It also finds:
+
+- which side of the image is further from focus (the *handedness*);
+- how far the specimen is tilted relative to the stage angles.
+
+The results feed CTF correction and deconvolution (Reconstruction page). They
+are written as `<series>.defocus` for IMOD and shown on the Results page.
+
+| Setting | Default | Notes |
+|---|---|---|
+| Estimate the CTF of every tilt | on | For series whose stacks already exist, the CTF is estimated from the bin 1 aligned stack when the batch is re-run. |
+| Spherical aberration | 2.7 mm | Titan Krios / Glacios: 2.7. |
+| Amplitude contrast | 0.07 | Typical for cryo samples. |
+| Fit range | 30 to 8 Å | The high-resolution end is limited to 2.2 × the pixel size. |
+| Defocus search | 0.5 to 12 µm | Underfocus. |
+
 ## Outputs page
 
 ![Outputs page](images/outputs.png)
@@ -179,6 +199,19 @@ at the top shows whether IMOD was found.
 | CPU cores, GPU | all but one core, off | GPU back-projection needs a CUDA-enabled IMOD. |
 | Remove X-rays | on | ccderaser on the stack. |
 
+**CTF correction and deconvolution**
+
+| Setting | Default | Notes |
+|---|---|---|
+| Correct the CTF | on | IMOD ctfphaseflip phase-flips the aligned stack with pyPrep's per-tilt defocus. At bin 4 with ~2–3 µm defocus the first CTF zero is near Nyquist, so it changes little. It matters for bin 1–2 tomograms. |
+| Also write a deconvolved tomogram | on | `<series>_rec_deconv.mrc`: a Wiener-like filter with the CTF. It gives stronger low-resolution contrast and less noise, for viewing, picking and segmentation. The normal tomogram is kept. About 10 s on the GPU. |
+| Deconvolution strength | 1.0 | Higher = stronger contrast boost. |
+| SNR falloff | 1.0 | Higher = smoother result. |
+
+Both use the defocus measured by CTF estimation. Without it, deconvolution
+falls back to the target defocus in the mdoc and the log says so, and CTF
+correction is skipped.
+
 **Advanced**: extra batchruntomo directives (`key = value`, one per line) are
 added to — and override — the preset. **Show directives for the selected
 series** displays exactly what will be sent to batchruntomo. The directive
@@ -202,21 +235,30 @@ output folder.
 
 Approximate times on a Quadro M4000 (46-tilt K3 series, 5760 x 4092, 4
 fractions per tilt): frame alignment and bin 1 + bin 4 stacks ~40 s;
-batchruntomo at bin 4 ~2 min. Writing large stacks is often limited by disk
-speed.
+CTF estimation ~15 s; batchruntomo at bin 4 ~2 min; deconvolution ~10 s.
+Writing large stacks is often limited by disk speed.
 
 ## Results page
 
 ![Results page](images/results.png)
 
-- **Show**: the tomogram (if reconstructed) and every stack written. Stacks are
+- **Show**: the deconvolved tomogram and the tomogram (if reconstructed), and
+  every stack written. Stacks are
   loaded in the background (a progress bar appears); large full-resolution
   stacks are shown reduced for speed.
 - The slider under the image steps through tilts (labelled with the tilt
   angle) or tomogram slices. The histogram on the right sets the contrast.
-- **Drift / Intensity / Alignment score per tilt** (selector above the plot):
-  frame drift, intensity against the expected curve (QC), or the frame
-  alignment score. Flagged tilts are red. Click a point to jump to that tilt.
+- **Plot selector** (above the plot), all against tilt angle unless noted:
+  - frame drift;
+  - intensity against the expected curve (QC);
+  - frame alignment score;
+  - **defocus per tilt**, where red marks tilts whose CTF fit resolution is
+    much worse than the rest (thick ice, drift, contamination);
+  - **CTF fit of the current tilt**, plotted against spatial frequency: the
+    flattened spectrum with the fitted model. The rings should line up.
+
+  In the tilt-angle plots, flagged tilts are red; click a point to jump to that
+  tilt.
 - **Frame trajectory**: the per-frame shifts of the current tilt (square = first
   frame), in Å.
 - **Open in 3dmod**, **Open in etomo** (the batchruntomo project), **Open folder**.

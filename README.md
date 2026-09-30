@@ -30,7 +30,10 @@ and after processing, warns about saturated fraction files, resumes interrupted
 batches, and skips missing tilts. Its viewer shows the stacks, tomograms and
 per-tilt drift and QC plots, and exports TIFF for Fiji. A **Gallery** shows a
 thumbnail of every tomogram in the session, with its name, to pick the best data
-to take further. When IMOD's automatic positioning fails, **Position tomogram**
+to take further. pyPrep measures the **defocus of every tilt** on the GPU (tilt-aware, with
+automatic handedness), phase-flips the stack in IMOD with it, and writes a
+**deconvolved tomogram** with stronger contrast for viewing and segmentation.
+When IMOD's automatic positioning fails, **Position tomogram**
 lets you mark the top and bottom of the specimen. pyPrep then rebuilds the
 tomogram flat, centred and at the right thickness.
 
@@ -53,6 +56,8 @@ Each tilt series ends up in `<Output>\<series>\`:
 | `<series>.mrc`, `<series>_bin4.mrc` | motion-corrected tilt series, sorted by tilt angle |
 | `.rawtlt`, `.mrc.mdoc` | tilt angles and metadata for etomo |
 | `imod_bin4\<series>_rec.mrc` | tomogram (`imod_bin4\<series>.edf` opens the etomo project) |
+| `imod_bin4\<series>_rec_deconv.mrc` | deconvolved tomogram, for viewing and segmentation |
+| `<series>.defocus` | per-tilt defocus (IMOD format) |
 | `_motion.csv`, `_pyprep.json`, `_pyprep.log` | frame shifts, full record of the run, log |
 
 ## Documentation
@@ -61,7 +66,7 @@ Each tilt series ends up in `<Output>\<series>\`:
 |---|---|
 | [Installation](docs/installation.md) | requirements, installer options (GPU/CUDA builds), IMOD, updating |
 | [User guide](docs/user-guide.md) | every page and setting of the app, running a batch, continuing in etomo |
-| [Command line](docs/command-line.md) | `pyprep scan` / `pyprep run`, all options, the settings file |
+| [Command line](docs/command-line.md) | `pyprep scan`, `run`, `ctf`, `deconv`, `gallery`, `export`, the settings file |
 | [Output files](docs/outputs.md) | what each file contains |
 | [How it works](docs/how-it-works.md) | algorithms, validation, references |
 | [Troubleshooting](docs/troubleshooting.md) | GPU, missing tilts, gain references, IMOD |
@@ -90,8 +95,10 @@ data. Please report how it works on yours.
 
 On a Quadro M4000, a 46-tilt K3 series (5760 x 4092 pixels, 4 fractions per
 tilt) takes about 40 s for frame alignment plus the bin 1 and bin 4 stacks.
-The bin-4 batchruntomo reconstruction takes about 2 minutes more. Frame shifts
-agree with IMOD `alignframes` to within about 0.03 px.
+CTF estimation adds about 15 s, and the bin-4 batchruntomo reconstruction about
+2 minutes. Deconvolution then takes about 10 s. Frame shifts agree with IMOD
+`alignframes` to within about 0.03 px. Per-tilt defocus agrees with IMOD
+`ctfplotter` to within about 40 nm RMS.
 
 ## Development
 
@@ -104,6 +111,8 @@ The code is organised as follows:
 
 - `pyprep/io`: MRC, mdoc, EER and gain-reference files
 - `pyprep/motion.py`: frame alignment
+- `pyprep/ctf.py`, `pyprep/deconv.py`: CTF estimation, tomogram deconvolution
+- `pyprep/positioning.py`: interactive tomogram positioning
 - `pyprep/pipeline.py`: processing a tilt series
 - `pyprep/imod.py`: running batchruntomo
 - `pyprep/gui`: the PySide6 app

@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 
+from .ctf import CtfSettings
 from .imod import ReconSettings
 from .motion import MotionSettings
 
@@ -48,6 +49,7 @@ class ProcessingSettings:
     motion: MotionSettings = field(default_factory=MotionSettings)
     output: OutputSettings = field(default_factory=OutputSettings)
     recon: ReconSettings = field(default_factory=ReconSettings)
+    ctf: CtfSettings = field(default_factory=CtfSettings)
     frames_dir: str | None = None   # where fraction files live, if not next to the mdoc
     use_gpu: bool = True
     gpu_id: int = 0
@@ -62,12 +64,13 @@ class ProcessingSettings:
         def build(klass, data):
             names = {f.name for f in fields(klass)}
             return klass(**{k: v for k, v in (data or {}).items() if k in names})
-        top = {k: v for k, v in d.items() if k not in ("input", "motion", "output", "recon")}
+        top = {k: v for k, v in d.items() if k not in ("input", "motion", "output", "recon", "ctf")}
         s = build(cls, top)
         s.input = build(InputSettings, d.get("input"))
         s.motion = build(MotionSettings, d.get("motion"))
         s.output = build(OutputSettings, d.get("output"))
         s.recon = build(ReconSettings, d.get("recon"))
+        s.ctf = build(CtfSettings, d.get("ctf"))
         return s
 
     def save(self, path) -> None:
