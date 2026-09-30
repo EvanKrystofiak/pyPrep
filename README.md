@@ -47,7 +47,8 @@ is a normal etomo project.
 
 ```bat
 env\python.exe -m pyprep scan "E:\session"
-env\python.exe -m pyprep run "E:\session" -o "E:\session\pyPrep" --bin 1 4 --reconstruct
+env\python.exe -m pyprep run "E:\session" -o "E:\session\pyPrep" --bin 1 4
+env\python.exe -m pyprep run "E:\session" -o "E:\session\pyPrep" --no-reconstruct
 env\python.exe -m pyprep run --help
 ```
 

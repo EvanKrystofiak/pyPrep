@@ -66,6 +66,8 @@ def cmd_run(args) -> int:
     r = settings.recon
     if args.reconstruct:
         r.enabled = True
+    if args.no_reconstruct:
+        r.enabled = False
     if args.preset:
         r.preset = args.preset
     if args.recon_bin:
@@ -130,7 +132,8 @@ def main(argv=None) -> int:
     p.add_argument("--align-bin", type=int, help="binning used for measuring shifts (default 4)")
     p.add_argument("--bfactor", type=float, help="B-factor for alignment in A^2 (default 500)")
     p.add_argument("--cpu", action="store_true", help="do not use the GPU")
-    p.add_argument("--reconstruct", action="store_true", help="run IMOD batchruntomo after alignment")
+    p.add_argument("--reconstruct", action="store_true", help="run IMOD batchruntomo after alignment (default)")
+    p.add_argument("--no-reconstruct", action="store_true", help="stacks only, no IMOD reconstruction")
     p.add_argument("--preset", choices=["patch", "gold"], help="batchruntomo preset (default patch)")
     p.add_argument("--recon-bin", type=int, help="binning of the stack to reconstruct (default 4)")
     p.add_argument("--thickness", type=float, help="reconstruction (fallback) thickness in nm")

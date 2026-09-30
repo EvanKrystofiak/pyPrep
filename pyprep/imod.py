@@ -34,7 +34,7 @@ PRESETS = {
 
 @dataclass
 class ReconSettings:
-    enabled: bool = False
+    enabled: bool = True
     preset: str = "patch"
     bin: int = 4                           # which pyPrep stack to reconstruct (bin level)
     use_dose_weighted: bool = False        # reconstruct the _DW stack instead of the plain sum
