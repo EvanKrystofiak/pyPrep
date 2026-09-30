@@ -171,6 +171,8 @@ class MainWindow(QMainWindow):
         self.forms.preview_requested.connect(self.preview)
         self.forms.show_directives_requested.connect(self.show_directives)
         self.results = ResultsPanel()
+        self.results.position_requested.connect(self.open_positioning)
+        self.results.redo_requested.connect(self.redo_reconstruction)
         self.gallery = GalleryPanel()
         self.gallery.open_series.connect(self._open_series_from_gallery)
         self.log_page = LogPage()
@@ -364,6 +366,31 @@ class MainWindow(QMainWindow):
             b.setChecked(k == key)
         if key == "gallery":
             self.gallery.set_output(self.top.output.path())
+
+    def open_positioning(self, recon_dir: str, root: str):
+        from .positioning_dialog import PositioningDialog
+        dlg = PositioningDialog(recon_dir, root, log=self.append_log, parent=self)
+        dlg.tomogram_updated.connect(self._tomogram_updated)
+        dlg.exec()
+
+    def _tomogram_updated(self, recon_dir: str):
+        self.results.load_series(Path(recon_dir).parent, prefer="tomo")
+        self.gallery.refresh()
+
+    def redo_reconstruction(self, name: str):
+        row = next((r for r, ts in enumerate(self.series) if ts.name == name), None)
+        if row is None:
+            QMessageBox.information(self, "pyPrep", f"{name} is not in the current session list - "
+                                                    "use Find tilt series first.")
+            return
+        settings = self.forms.get_settings()
+        if not settings.recon.enabled:
+            QMessageBox.information(self, "pyPrep", "Reconstruction is turned off on the Reconstruction page.")
+            return
+        if QMessageBox.question(self, "pyPrep", f"Run batchruntomo again for {name}? The current tomogram and "
+                                                "any manual positioning will be replaced.") != QMessageBox.Yes:
+            return
+        self._start_jobs([(row, self.series[row])], settings, force_recon=True)
 
     def _open_series_from_gallery(self, name: str):
         for r, ts in enumerate(self.series):
@@ -721,7 +748,29 @@ class MainWindow(QMainWindow):
                        "cancelled": False}
         self._set_busy(True)
         self.show_page("log")
-        worker = BatchWorker(jobs, settings, out_root)
+        self._launch_batch(jobs, settings, out_root)
+
+    def _start_jobs(self, jobs, settings, force_recon=False):
+        """Start a batch outside the normal Start button (e.g. redo one reconstruction)."""
+        out_root = self.top.output.path()
+        if out_root is None:
+            return
+        settings.frames_dir = str(self.frames_path.path()) if self.frames_path.path() else None
+        for r, _ in jobs:
+            self._set_cell(r, COL_TOMO, "queued")
+        self.overall.setRange(0, len(jobs))
+        self.overall.setValue(0)
+        self.overall.setFormat("%v / %m series")
+        self.current.setValue(0)
+        self.run_msg.setStyleSheet("")
+        self._batch = {"t0": time.monotonic(), "jobs": len(jobs), "failed": [], "last_row": None,
+                       "cancelled": False}
+        self._set_busy(True)
+        self.show_page("log")
+        self._launch_batch(jobs, settings, out_root, force_recon)
+
+    def _launch_batch(self, jobs, settings, out_root, force_recon=False):
+        worker = BatchWorker(jobs, settings, out_root, force_recon)
         worker.series_started.connect(self._on_series_started)
         worker.series_progress.connect(self._on_progress)
         worker.series_finished.connect(self._on_series_finished)

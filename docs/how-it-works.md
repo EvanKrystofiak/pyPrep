@@ -170,6 +170,52 @@ environment from the `PATH` it passes to IMOD, so a different Python version
 cannot interfere. The batchruntomo output streams to the log, and cancelling
 stops the whole IMOD process tree.
 
+## Manual tomogram positioning
+
+This replaces etomo's *tomopitch* step (`pyprep/positioning.py`).
+
+**Trial tomogram.** The aligned stack (`<series>_ali.mrc`) is binned 2× on the
+GPU. IMOD `tilt` then reconstructs it with the project's own `tilt.com`
+parameters, a larger THICKNESS and `IMAGEBINNED 2`. THICKNESS stays in unbinned
+pixels.
+
+**Views.** Averaging the trial along Y or X shows only the smooth
+reconstruction background. So each Y slice is high-pass filtered (the slice
+minus a Gaussian blur with σ = 6 px), and the squared result is summed:
+
+- over Y to give the XZ view;
+- over X to give the YZ view.
+
+The square root of these sums is displayed. Specimen detail is bright; ice or
+vacuum is dark. *Auto* places the lines where the row-averaged energy rises 30%
+of the way from the background to the peak.
+
+**Geometry.** The reconstruction is stored with rows = Z (row 0 at the bottom),
+columns = X and sections = Y. For a specimen with:
+
+- mid-plane slope angle *a* in XZ and *b* in YZ, and
+- centre *c* pixels above the middle of the volume,
+
+the specimen is made flat and centred by:
+
+- adding *a* to `OFFSET` (the tilt-angle offset);
+- adding *b* to `XAXISTILT`;
+- adding −*c*·cos *a*·cos *b* to the Z component of `SHIFT`;
+- setting `THICKNESS` = specimen thickness · cos *a* · cos *b* + 2 × margin.
+
+These signs and factors were measured, not assumed. A synthetic cloud of dots
+was tilted by 10° and −6° and raised by 25 px, then projected and reconstructed
+with IMOD `tilt`. Fitting planes to the reconstructed dots gave the slopes and
+centre. After the correction, the fitted slopes were −0.8° and −0.2° and the
+centre was 0.6 px from the middle.
+
+**Rebuild.** The original `tilt.com` is kept once as `tilt.com.pyprep_orig`.
+The new parameters are written into `tilt.com`, which stays a valid etomo
+command file. `tilt` is re-run, then the `trimvol` command from batchruntomo's
+`trimvol.com` rotates the volume to Z slices again. Each rebuild is noted under
+`positioning` in `pyprep_recon.json`. A new batchruntomo run (*Redo
+reconstruction*) removes the backup and the trial files.
+
 ## Responsiveness
 
 GPU processing, reading and writing run on worker threads:

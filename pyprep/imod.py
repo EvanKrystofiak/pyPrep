@@ -182,6 +182,9 @@ def prepare_recon_dir(out_dir: Path, series_name: str, stack: Path) -> Path:
     m = re.search(r"_bin(\d+)", stack.stem)
     recon_dir = out_dir / f"imod_bin{m.group(1) if m else 1}"
     recon_dir.mkdir(parents=True, exist_ok=True)
+    # Manual-positioning leftovers belong to the previous run's alignment.
+    for old in ("tilt.com.pyprep_orig", "pyprep_pos_trial.mrc", "pyprep_pos_ali_bin2.mrc"):
+        (recon_dir / old).unlink(missing_ok=True)
     dst = recon_dir / f"{series_name}.mrc"
     shutil.copyfile(stack, dst)
     shutil.copyfile(stack.with_suffix(".rawtlt"), recon_dir / f"{series_name}.rawtlt")

@@ -70,6 +70,9 @@ def robust_levels(img: np.ndarray) -> tuple[float, float]:
 
 
 class ResultsPanel(QWidget):
+    position_requested = Signal(str, str)     # recon_dir, root
+    redo_requested = Signal(str)              # series name
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.out_dir: Path | None = None
@@ -109,7 +112,14 @@ class ResultsPanel(QWidget):
         self.btn_tiff.setToolTip("Save the shown stack/tomogram as an 8-bit ImageJ TIFF (pixel size in nm),\n"
                                  "e.g. for Fiji or segmentation tools.")
         self.btn_tiff.clicked.connect(self._export_tiff)
-        for b in (self.btn_3dmod, self.btn_etomo, self.btn_tiff, self.btn_folder):
+        self.btn_position = QPushButton("Position tomogram…")
+        self.btn_position.setToolTip("Mark the top and bottom of the specimen and rebuild the tomogram\n"
+                                     "level, centred and at the right thickness.")
+        self.btn_position.clicked.connect(self._request_position)
+        self.btn_redo = QPushButton("Redo reconstruction")
+        self.btn_redo.setToolTip("Run batchruntomo again for this series with the current Reconstruction settings.")
+        self.btn_redo.clicked.connect(self._request_redo)
+        for b in (self.btn_position, self.btn_redo, self.btn_3dmod, self.btn_etomo, self.btn_tiff, self.btn_folder):
             top.addWidget(b)
         lay.addLayout(top)
         self.loading = QProgressBar()
@@ -272,7 +282,10 @@ class ResultsPanel(QWidget):
                 if vol is not None:
                     bridge.loaded.emit(req, (kind, path, vol))
             except Exception as e:  # reported on the GUI thread
-                bridge.loaded.emit(req, e)
+                try:
+                    bridge.loaded.emit(req, e)
+                except RuntimeError:                 # window closed while loading
+                    pass
 
         threading.Thread(target=work, name="pyprep-display-load", daemon=True).start()
 
@@ -426,8 +439,22 @@ class ResultsPanel(QWidget):
         elif result is not None:
             self.title.setText(self.title.text() + f"<br>Exported {Path(result).name}")
 
+    def _request_position(self):
+        recon = (self.record or {}).get("reconstruction") or {}
+        d = recon.get("recon_dir")
+        if d and (Path(d) / "tilt.com").exists():
+            self.position_requested.emit(d, self.record["series"])
+
+    def _request_redo(self):
+        if self.record and self.record.get("series"):
+            self.redo_requested.emit(self.record["series"])
+
     def _set_buttons(self):
         data = self.stack_combo.currentData()
+        recon = (self.record or {}).get("reconstruction") or {}
+        can_position = bool(recon.get("recon_dir")) and (Path(recon["recon_dir"]) / "tilt.com").exists()
+        self.btn_position.setEnabled(can_position)
+        self.btn_redo.setEnabled(bool((self.record or {}).get("series")) and self.out_dir is not None)
         self.btn_3dmod.setEnabled(bool(data) and imod_program("3dmod") is not None)
         self.btn_tiff.setEnabled(bool(data))
         self.btn_etomo.setEnabled(self._edf() is not None and imod_program("etomo") is not None)

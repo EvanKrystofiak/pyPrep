@@ -20,11 +20,12 @@ class BatchWorker(QObject):
     log = Signal(str)
     finished = Signal()
 
-    def __init__(self, jobs, settings: ProcessingSettings, out_root: Path):
+    def __init__(self, jobs, settings: ProcessingSettings, out_root: Path, force_recon: bool = False):
         super().__init__()
         self.jobs = jobs                 # list of (row, TiltSeries)
         self.settings = settings
         self.out_root = Path(out_root)
+        self.force_recon = force_recon
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -42,7 +43,7 @@ class BatchWorker(QObject):
                 res = run_series(
                     series, self.settings, self.out_root,
                     progress=lambda d, n, m, r=row: self.series_progress.emit(r, d, n, m),
-                    cancel=self._cancel, log_callback=self.log.emit)
+                    cancel=self._cancel, log_callback=self.log.emit, force_recon=self.force_recon)
             except Exception as e:  # report and continue with the next series
                 self.log.emit(f"{series.name} FAILED: {e}\n{traceback.format_exc()}")
                 res = {"stacks": "failed", "recon": None, "seconds": 0}

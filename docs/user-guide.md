@@ -222,9 +222,38 @@ speed.
 - **Open in 3dmod**, **Open in etomo** (the batchruntomo project), **Open folder**.
 - **Export TIFF…** saves the shown stack or tomogram as an 8-bit ImageJ TIFF
   with the pixel size in nm, for Fiji and segmentation tools.
+- **Position tomogram…** fixes a tomogram that is tilted, off-centre, cut off or
+  much thicker than the specimen (see below).
+- **Redo reconstruction** runs batchruntomo again for this series with the
+  current Reconstruction settings (for example after changing the preset or
+  excluding tilts). It replaces the tomogram and any manual positioning.
 
 After **Test on one tilt**, the slider shows the unaligned (0) and aligned (1)
 sums of that tilt.
+
+### Positioning a tomogram
+
+IMOD's automatic positioning fails on some specimens (sparse particles, thin
+films), leaving a fallback thickness. The *Position tomogram* window does the
+same job as etomo's manual *Tomogram positioning* step, without leaving pyPrep:
+
+1. **Make trial tomogram** (about 15 s) reconstructs the aligned stack at bin 2,
+   thicker than the specimen (*Trial thickness*, 600 nm by default).
+2. Two views appear: **XZ** (seen along Y) and **YZ** (seen along X). They show
+   where the trial has fine detail, so the specimen is bright and empty ice or
+   vacuum is dark. **Auto** places the lines for you.
+3. Drag the **teal line** to the top of the specimen and the **amber line** to
+   its bottom in *both* views. Drag the end points to follow a tilted
+   specimen. The readout shows the specimen thickness, the tilt corrections, the
+   Z shift and the final tomogram thickness, which is the specimen plus
+   *Margin each side*.
+4. **Rebuild tomogram with these boundaries** (about 30 s) writes the
+   corrections into `tilt.com` and re-runs IMOD `tilt` and `trimvol`. The
+   Results page and the Gallery thumbnail update.
+
+**Restore original** goes back to batchruntomo's positioning. You can repeat the
+steps: a new trial uses the current positioning, and the corrections add up.
+The etomo project stays valid.
 
 ## Gallery page
 

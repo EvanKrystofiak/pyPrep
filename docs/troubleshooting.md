@@ -96,8 +96,13 @@ larger fractions.
   in IMOD's installation instructions and check that `etomo` runs.
 - **"Tomogram positioning did not work; proceeding if possible"**: IMOD could
   not find the specimen slab (common for sparse samples); the fallback thickness
-  is used. Choose *Fixed thickness* on the Reconstruction page to skip the
-  attempt, or set the thickness in etomo afterwards.
+  is used. Afterwards, use *Position tomogram…* on the Results page to set the
+  thickness, tilt and centre by eye. Or choose *Fixed thickness* on the
+  Reconstruction page to skip the attempt.
+- **Tomogram is tilted, off-centre or cuts off part of the specimen**: use
+  *Position tomogram…* on the Results page.
+- **Positioning window: the specimen is not visible or fills the whole view**:
+  make a new trial with a larger *Trial thickness*.
 - **Reconstruction failed**: the IMOD messages are in the Log page and in
   `<series>_pyprep.log`; the directives used are in
   `imod_bin<N>\pyprep_batchruntomo.adoc`. Open the project in etomo to see which

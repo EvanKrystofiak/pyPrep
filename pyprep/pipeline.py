@@ -504,7 +504,7 @@ def reconstruct_series(series: TiltSeries, settings: ProcessingSettings, out_roo
 
 def run_series(series: TiltSeries, settings: ProcessingSettings, out_root,
                progress: ProgressFn | None = None, cancel: threading.Event | None = None,
-               log_callback: Callable[[str], None] | None = None) -> dict:
+               log_callback: Callable[[str], None] | None = None, force_recon: bool = False) -> dict:
     """Frame alignment + stacks, then (if enabled) IMOD reconstruction.
 
     Steps already complete are skipped when ``settings.skip_existing`` is set.
@@ -522,7 +522,7 @@ def run_series(series: TiltSeries, settings: ProcessingSettings, out_root,
     if settings.recon.enabled and result["stacks"] in ("complete", "skipped"):
         if cancel is not None and cancel.is_set():
             result["recon"] = "cancelled"
-        elif settings.skip_existing and recon_complete(series, settings, out_root):
+        elif settings.skip_existing and not force_recon and recon_complete(series, settings, out_root):
             say(f"{series.name}: tomogram already complete - skipped")
             result["recon"] = "skipped"
         else:

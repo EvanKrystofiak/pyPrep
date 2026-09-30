@@ -30,7 +30,9 @@ and after processing, warns about saturated fraction files, resumes interrupted
 batches, and skips missing tilts. Its viewer shows the stacks, tomograms and
 per-tilt drift and QC plots, and exports TIFF for Fiji. A **Gallery** shows a
 thumbnail of every tomogram in the session, with its name, to pick the best data
-to take further.
+to take further. When IMOD's automatic positioning fails, **Position tomogram**
+lets you mark the top and bottom of the specimen. pyPrep then rebuilds the
+tomogram flat, centred and at the right thickness.
 
 ## Quick start
 

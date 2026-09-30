@@ -81,7 +81,17 @@ and the *skip completed steps* option read it.
 ## Reconstruction folder (`imod_bin<N>`)
 
 A complete etomo project created by batchruntomo from a copy of the binned
-stack (named `<series>.mrc` inside the folder). pyPrep does not modify it
-afterwards, so you can open it in etomo and change or redo any step. The final
-tomogram is `<series>_rec.mrc`, trimmed and rotated around X so that sections
-are Z slices (IMOD's default for batchruntomo).
+stack (named `<series>.mrc` inside the folder). You can open it in etomo and
+change or redo any step. The final tomogram is `<series>_rec.mrc`. It is
+trimmed and rotated around X so that sections are Z slices (IMOD's default for
+batchruntomo).
+
+pyPrep changes this folder only when you use *Position tomogram*, which adds:
+
+| File | Contents |
+|---|---|
+| `tilt.com.pyprep_orig` | `tilt.com` as batchruntomo wrote it (*Restore original* copies it back) |
+| `pyprep_pos_ali_bin2.mrc` | aligned stack binned 2×, input for the trial tomogram |
+| `pyprep_pos_trial.mrc` | the thick trial tomogram shown in the positioning window |
+
+The two `pyprep_pos_*` files can be deleted at any time.
