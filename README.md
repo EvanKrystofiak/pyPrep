@@ -1,76 +1,120 @@
 # pyPrep
 
-Cryo-ET tilt-series preparation for Windows: GPU frame alignment of dose
-fractions, etomo-ready tilt-series stacks, and optional reconstruction with
-IMOD's batchruntomo.
+**Cryo-ET tilt-series preparation for Windows.** pyPrep aligns the dose
+fractions of every tilt on the GPU, builds etomo-ready tilt-series stacks, and
+reconstructs tomograms automatically with IMOD. It processes a whole session at
+once, from a desktop app or from the command line.
 
-## Start
+![pyPrep](docs/images/tilt_series.png)
 
-Double-click `pyPrep.bat`. It uses the project's own Python environment in `env\`.
+## What it does
 
-1. **Top bar:** choose the session folder (containing the `.mdoc` files) and an
-   output folder, then click **Find tilt series**.
-2. **Tilt series:** check the series to process. Uncheck single tilts to leave
-   them out. Missing fraction files are flagged and skipped.
-3. **Frame alignment / Outputs / Reconstruction:** settings. **Test on one tilt**
-   previews the alignment without writing anything.
-4. **Start** (bottom left) processes every checked series. Progress is shown in
-   the navigation bar and the full output on the **Log** page.
-5. **Results:** view the stacks and tomograms, drift per tilt and frame
-   trajectories, and open them in 3dmod or etomo.
+For every tilt series in a session folder, pyPrep:
 
-## Outputs (per series, in `<output>/<series>/`)
+1. **Reads the `.mdoc`** written by Thermo Fisher **Tomo5** or **SerialEM**,
+   and finds each tilt's movie file. These can be MRC fractions (for example
+   Tomo5 K3), TIFF stacks, or Falcon **EER** files.
+2. **Aligns the frames of every tilt** on the GPU and sums them. The alignment
+   is iterative, in the style of MotionCor, and is robust to detector
+   fixed-pattern noise.
+3. **Writes stacks sorted by tilt angle** at the binnings you choose. Each
+   stack has a `.rawtlt` and a re-ordered `.mdoc`, so etomo picks up the tilt
+   angles, tilt axis, pixel size and dose. Even/odd half-sums (for denoising)
+   and dose-weighted stacks are optional.
+4. **Runs IMOD batchruntomo** to produce a **tomogram**, at bin 4 by default.
+   You can choose patch tracking or gold fiducials. The result is a normal
+   etomo project that you can open and refine.
+
+pyPrep resumes interrupted batches and skips missing tilts. It also shows drift
+plots and the results in its viewer.
+
+## Quick start
+
+1. Install [Miniconda](https://docs.conda.io/en/latest/miniconda.html). For
+   reconstruction, also install
+   [IMOD for Windows](https://bio3d.colorado.edu/imod/).
+2. Download pyPrep, either with
+   `git clone https://github.com/EvanKrystofiak/pyPrep.git` or with
+   **Code > Download ZIP**. Then double-click **`install.bat`**.
+3. Double-click **`pyPrep.bat`**.
+4. Choose the **Session** folder (the one with the `.mdoc` files) and an
+   **Output** folder. Click **Find tilt series**, then **Start**.
+
+Each tilt series ends up in `<Output>\<series>\`:
 
 | File | Contents |
 |---|---|
-| `<series>.mrc`, `<series>_bin4.mrc` | aligned sums, sorted by tilt angle |
-| `_EVN` / `_ODD` | half-sums of alternate frames (for denoising) |
-| `_DW` | dose-weighted sum (skip etomo's own dose weighting for this one) |
-| `.rawtlt`, `.mrc.mdoc` | tilt angles, tilt axis, pixel size, dose (read by etomo / extracttilts) |
-| `<series>_motion.csv`, `_pyprep.json`, `_pyprep.log` | per-frame shifts, settings, log |
-| `imod_bin4/` | batchruntomo etomo project; tomogram `<series>_rec.mrc` |
+| `<series>.mrc`, `<series>_bin4.mrc` | motion-corrected tilt series, sorted by tilt angle |
+| `.rawtlt`, `.mrc.mdoc` | tilt angles and metadata for etomo |
+| `imod_bin4\<series>_rec.mrc` | tomogram (`imod_bin4\<series>.edf` opens the etomo project) |
+| `_motion.csv`, `_pyprep.json`, `_pyprep.log` | frame shifts, full record of the run, log |
 
-## Movie formats
+## Documentation
 
-- **Tomo5 / K3 MRC fractions** (8-bit, already gain-normalized): used as saved.
-- **MRC / TIFF** frame stacks from other software.
-- **Falcon EER** (TIFF compression 65000/65001/65002). Each tilt's EER frames
-  are summed into fractions before alignment: 10 per tilt by default, or a fixed
-  number of EER frames per fraction. They are rendered at physical pixels (4K),
-  or at 2x super-resolution (8K) and Fourier-binned back to the physical pixel
-  size. Supply the EPU `.gain` reference on the Frame alignment page. `.gain`
-  files are divided out automatically; the rotate and flip options fix a
-  mismatched orientation. Decoding uses `imagecodecs`, the same decoder
-  `tifffile` uses. It has been validated against synthetic EER files but not
-  yet against real Falcon data.
+| Page | Covers |
+|---|---|
+| [Installation](docs/installation.md) | requirements, installer options (GPU/CUDA builds), IMOD, updating |
+| [User guide](docs/user-guide.md) | every page and setting of the app, running a batch, continuing in etomo |
+| [Command line](docs/command-line.md) | `pyprep scan` / `pyprep run`, all options, the settings file |
+| [Output files](docs/outputs.md) | what each file contains |
+| [How it works](docs/how-it-works.md) | algorithms, validation, references |
+| [Troubleshooting](docs/troubleshooting.md) | GPU, missing tilts, gain references, IMOD |
 
-## Reconstruction presets
+## Requirements
 
-- **Patch tracking (default):** no fiducials. Uses 400 nm patches with 0.6
-  overlap, scaled from the reference Position_9_2 etomo project.
-- **Gold fiducials:** autofidseed + beadtrack with 10 nm beads, and gold erasing.
-  These are the settings of the lab's Linux batchruntomo script.
+- Windows 10 or 11 (64-bit), with 16 GB of RAM or more.
+- An NVIDIA GPU with driver 452.39 or newer. It was tested on a Quadro M4000
+  with 8 GB. The GPU is optional, but running on the CPU is 10–50 times slower.
+- Miniconda. The installer uses it to create a private Python 3.11 environment.
+- IMOD 4.11 or newer for Windows, needed only for reconstruction.
 
-Both use cryo positioning with a fallback thickness. On sparse samples (for
-example isolated microvilli) IMOD's positioning cannot find the specimen slab,
-and the fallback thickness is used; choose **Fixed thickness** to skip it. Extra
-directives can be added on the Reconstruction page. Every reconstruction folder
-is a normal etomo project.
+## Supported data
 
-## Command line
+| Input | Notes |
+|---|---|
+| Tomo5 or SerialEM `.mdoc` | tilt angles, collection order, dose, pixel size, tilt axis, movie file names |
+| MRC fractions | all MRC modes, including 8-bit (Tomo5 K3, already gain-normalized) and 4-bit |
+| TIFF frame stacks | for example from SerialEM; gain reference as MRC or TIFF (convert `.dm4` with IMOD `dm2mrc`) |
+| Falcon EER | codecs 65000–65002; grouped into fractions; 4K or 8K super-resolution; EPU `.gain` reference |
 
-```bat
-env\python.exe -m pyprep scan "E:\session"
-env\python.exe -m pyprep run "E:\session" -o "E:\session\pyPrep" --bin 1 4
-env\python.exe -m pyprep run "E:\session" -o "E:\session\pyPrep" --no-reconstruct
-env\python.exe -m pyprep run --help
-```
+EER support has been tested on synthetic EER files but not yet on real Falcon
+data. Please report how it works on yours.
 
-Settings saved from the app (File > Save settings) can be passed with `--settings file.json`.
+## Performance
+
+On a Quadro M4000, a 46-tilt K3 series (5760 x 4092 pixels, 4 fractions per
+tilt) takes about 40 s for frame alignment plus the bin 1 and bin 4 stacks.
+The bin-4 batchruntomo reconstruction takes about 2 minutes more. Frame shifts
+agree with IMOD `alignframes` to within about 0.03 px.
 
 ## Development
 
 ```bat
-env\python.exe -m pytest
-env\python.exe scripts\validate_alignment.py "Raw Data\Position_9_2.mdoc"
+env\python.exe -m pytest          # unit tests, on synthetic data
+env\python.exe -m pyprep --help   # command line
 ```
+
+The code is organised as follows:
+
+- `pyprep/io`: MRC, mdoc, EER and gain-reference files
+- `pyprep/motion.py`: frame alignment
+- `pyprep/pipeline.py`: processing a tilt series
+- `pyprep/imod.py`: running batchruntomo
+- `pyprep/gui`: the PySide6 app
+
+See [How it works](docs/how-it-works.md) for details.
+
+## Acknowledgements
+
+pyPrep builds on ideas from MotionCor2/3 (frame alignment) and TOMOMAN
+(tilt-series organisation), but uses no code from either. It relies on:
+
+- [IMOD](https://bio3d.colorado.edu/imod/) for tilt-series alignment and
+  reconstruction;
+- [PyTorch](https://pytorch.org) for GPU computing;
+- [imagecodecs](https://github.com/cgohlke/imagecodecs) and
+  [tifffile](https://github.com/cgohlke/tifffile) for EER decoding.
+
+References for the methods are listed in
+[How it works](docs/how-it-works.md#references). If you use pyPrep, please cite
+IMOD and the methods it implements.
