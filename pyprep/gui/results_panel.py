@@ -6,13 +6,14 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSplitter,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton,
+                               QSplitter, QVBoxLayout, QWidget)
 
 from ..io import mrc
 from . import theme
@@ -33,18 +34,33 @@ def imod_program(name: str) -> str | None:
     return shutil.which(name)
 
 
-def load_display_stack(path: Path) -> np.ndarray:
-    """Whole stack/volume, block-averaged so the longest edge is <= DISPLAY_MAX (display only)."""
+def load_display_stack(path: Path, progress=None, cancel: threading.Event | None = None) -> np.ndarray | None:
+    """Whole stack/volume, block-averaged so the longest edge is <= DISPLAY_MAX (display only).
+
+    Reads one section at a time with ordinary file reads (no memory map, so the
+    file is never locked against a batch rewriting it).  Runs on a background
+    thread; returns None if ``cancel`` is set.
+    """
     h = mrc.read_header(path)
     step = max(1, int(np.ceil(max(h.nx, h.ny) / DISPLAY_MAX)))
     out = []
     for z in range(h.nz):
+        if cancel is not None and cancel.is_set():
+            return None
         sec = mrc.read_sections(path, z, 1, header=h)[0]
         if step > 1:
             ny, nx = (h.ny // step) * step, (h.nx // step) * step
-            sec = sec[:ny, :nx].reshape(ny // step, step, nx // step, step).mean((1, 3))
-        out.append(sec.astype(np.float32))
+            sec = sec[:ny, :nx].reshape(ny // step, step, nx // step, step).mean((1, 3), dtype=np.float32)
+        out.append(sec.astype(np.float32, copy=False))
+        if progress is not None:
+            progress(z + 1, h.nz)
     return np.stack(out)
+
+
+class _LoadBridge(QObject):
+    """Carries results from loader threads back to the GUI thread (queued signals)."""
+    loaded = Signal(int, object)              # request id, (kind, path, volume) or Exception
+    progress = Signal(int, int, int)          # request id, sections done, total
 
 
 def robust_levels(img: np.ndarray) -> tuple[float, float]:
@@ -60,6 +76,11 @@ class ResultsPanel(QWidget):
         self._angles: list = []
         self._shifts: list = []
         self._showing_tilts = True
+        self._request = 0                        # id of the newest display load
+        self._load_cancel: threading.Event | None = None
+        self._bridge = _LoadBridge(self)
+        self._bridge.loaded.connect(self._on_loaded)
+        self._bridge.progress.connect(self._on_load_progress)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(22, 18, 22, 18)
@@ -85,6 +106,10 @@ class ResultsPanel(QWidget):
         for b in (self.btn_3dmod, self.btn_etomo, self.btn_folder):
             top.addWidget(b)
         lay.addLayout(top)
+        self.loading = QProgressBar()
+        self.loading.setMaximumHeight(22)
+        self.loading.hide()
+        lay.addWidget(self.loading)
 
         split = QSplitter(Qt.Vertical)
         view_card = card()
@@ -116,6 +141,8 @@ class ResultsPanel(QWidget):
         self.traj_plot.setAspectLocked(True)
         self.traj_plot.showGrid(x=True, y=True, alpha=0.25)
         for p in (self.drift_plot, self.traj_plot):
+            for side in ("left", "bottom"):
+                p.getAxis(side).enableAutoSIPrefix(False)   # keep plain Å / degrees, no x0.001 scaling
             c = card()
             cl = QVBoxLayout(c)
             cl.setContentsMargins(6, 6, 6, 6)
@@ -128,6 +155,10 @@ class ResultsPanel(QWidget):
 
     # ------------------------------------------------------------------ series results
     def clear(self, message: str = "No results yet for this tilt series."):
+        if self._load_cancel is not None:
+            self._load_cancel.set()
+        self._request += 1
+        self.loading.hide()
         self.out_dir, self.record = None, None
         self.stack_combo.clear()
         self.image.clear()
@@ -136,8 +167,11 @@ class ResultsPanel(QWidget):
         self.title.setText(message)
         self._set_buttons()
 
-    def load_series(self, out_dir: Path) -> bool:
-        """Show results for a series output folder; returns False if there are none."""
+    def load_series(self, out_dir: Path, prefer: str = "stack") -> bool:
+        """Show results for a series output folder; returns False if there are none.
+
+        ``prefer`` picks what to display first: "stack" (binned tilt series) or "tomo".
+        """
         out_dir = Path(out_dir)
         j = next(iter(sorted(out_dir.glob("*_pyprep.json"))), None) if out_dir.is_dir() else None
         try:
@@ -189,23 +223,58 @@ class ResultsPanel(QWidget):
         self.title.setText(" &nbsp;·&nbsp; ".join(parts))
         self._set_buttons()
         if self.stack_combo.count():
-            # Prefer a binned tilt series for a quick first look.
+            # Binned tilt series for a quick first look, or the tomogram after a batch.
             idx = next((i for i in range(self.stack_combo.count())
-                        if self.stack_combo.itemData(i)[0] == "stack"), 0)
+                        if self.stack_combo.itemData(i)[0] == prefer), None)
+            if idx is None:
+                idx = next((i for i in range(self.stack_combo.count())
+                            if self.stack_combo.itemData(i)[0] == "stack"), 0)
             self.stack_combo.setCurrentIndex(idx)
             self._show_selected()
         return True
 
     def _show_selected(self):
+        """Load the selected stack/tomogram on a background thread (never block the window)."""
         data = self.stack_combo.currentData()
         if not data or not Path(data[1]).exists():
             return
         kind, path = data
-        self.setCursor(Qt.WaitCursor)
-        try:
-            vol = load_display_stack(Path(path))
-        finally:
-            self.unsetCursor()
+        if self._load_cancel is not None:
+            self._load_cancel.set()                  # a newer choice supersedes a running load
+        self._request += 1
+        req, cancel = self._request, threading.Event()
+        self._load_cancel = cancel
+        self.loading.setRange(0, 0)
+        self.loading.setFormat(f"Loading {Path(path).name}…")
+        self.loading.show()
+        bridge = self._bridge
+
+        def work():
+            try:
+                vol = load_display_stack(Path(path), lambda d, n: bridge.progress.emit(req, d, n), cancel)
+                if vol is not None:
+                    bridge.loaded.emit(req, (kind, path, vol))
+            except Exception as e:  # reported on the GUI thread
+                bridge.loaded.emit(req, e)
+
+        threading.Thread(target=work, name="pyprep-display-load", daemon=True).start()
+
+    def _on_load_progress(self, req, done, total):
+        if req == self._request:
+            self.loading.setRange(0, total)
+            self.loading.setValue(done)
+            self.loading.setFormat(f"Loading… %v / %m sections")
+
+    def _on_loaded(self, req, payload):
+        if req != self._request:
+            return                                   # superseded by a newer selection
+        self.loading.hide()
+        self._load_cancel = None
+        if isinstance(payload, Exception):
+            self.title.setText(self.title.text() + f"<br><span style='color:{theme.DANGER}'>"
+                               f"Could not display: {payload}</span>")
+            return
+        kind, path, vol = payload
         self._showing_tilts = kind == "stack"
         xvals = (np.asarray(self._angles, dtype=float)
                  if self._showing_tilts and len(self._angles) == len(vol) else None)
@@ -242,6 +311,10 @@ class ResultsPanel(QWidget):
 
     # ------------------------------------------------------------------ single-tilt preview
     def show_preview(self, res: dict, pixel_size: float):
+        if self._load_cancel is not None:
+            self._load_cancel.set()
+        self._request += 1                           # a pending stack load must not overwrite this
+        self.loading.hide()
         self.out_dir, self.record = None, {"pixel_size": pixel_size}
         self.stack_combo.clear()
         stack = np.stack([res["unaligned"], res["aligned"]])

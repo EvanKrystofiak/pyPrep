@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThread
@@ -142,6 +143,7 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._on_done = None
         self._preview_series = None
+        self._batch: dict | None = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -604,6 +606,9 @@ class MainWindow(QMainWindow):
         self.overall.setValue(0)
         self.overall.setFormat("%v / %m series")
         self.current.setValue(0)
+        self.run_msg.setStyleSheet("")
+        self._batch = {"t0": time.monotonic(), "jobs": len(jobs), "failed": [], "last_row": None,
+                       "cancelled": False}
         self._set_busy(True)
         self.show_page("log")
         worker = BatchWorker(jobs, settings, out_root)
@@ -616,6 +621,8 @@ class MainWindow(QMainWindow):
     def cancel(self):
         if self._worker is not None and hasattr(self._worker, "cancel"):
             self._worker.cancel()
+            if self._batch:
+                self._batch["cancelled"] = True
             self.append_log("Cancelling…")
             self.run_msg.setText("Cancelling…")
             self.btn_cancel.setEnabled(False)
@@ -645,15 +652,39 @@ class MainWindow(QMainWindow):
         secs = res.get("seconds") or 0
         self.table.setItem(row, COL_TIME, _item(f"{secs / 60:.1f} min" if secs >= 90 else f"{secs:.0f} s", True))
         self.overall.setValue(self.overall.value() + 1)
+        if self._batch is not None:
+            self._batch["last_row"] = row
+            if res.get("stacks") not in ("complete", "skipped") or res.get("recon") in ("failed", "cancelled"):
+                self._batch["failed"].append(self.series[row].name)
         r, ts = self._current_series()
         if r == row and self.top.output.path():
-            self.results.load_series(self.top.output.path() / ts.name)
+            self.results.load_series(self.top.output.path() / ts.name, prefer="tomo")
 
     def _batch_done(self):
+        """Make the end of a batch unmistakable: summary, taskbar flash, results on screen."""
         self._set_busy(False)
-        self.run_msg.setText("Idle")
-        self.append_log("Batch finished.")
-        self.statusBar().showMessage("Batch finished", 10000)
+        b = self._batch or {"t0": time.monotonic(), "jobs": 0, "failed": [], "last_row": None, "cancelled": False}
+        self._batch = None
+        minutes = (time.monotonic() - b["t0"]) / 60
+        n, failed = b["jobs"], b["failed"]
+        if b["cancelled"]:
+            text, color = f"Cancelled after {minutes:.1f} min", theme.WARNING
+        elif failed:
+            text, color = f"Finished in {minutes:.1f} min - {len(failed)} of {n} series had problems", theme.DANGER
+        else:
+            text, color = f"Finished {n} series in {minutes:.1f} min", theme.OK
+        self.run_msg.setText(text)
+        self.run_msg.setStyleSheet(f"color: {color}; font-weight: 700;")
+        self.append_log(f"===== Batch finished: {text}" + (f" ({', '.join(failed)})" if failed else "") + " =====")
+        self.statusBar().showMessage(text)
+        QApplication.alert(self)          # flash the taskbar button if pyPrep is in the background
+        if not b["cancelled"] and b["last_row"] is not None and self.top.output.path():
+            r, _ = self._current_series()
+            row = r if r is not None else b["last_row"]
+            if r is None:
+                self.table.selectRow(row)
+            self.results.load_series(self.top.output.path() / self.series[row].name, prefer="tomo")
+            self.show_page("results")
 
     def _set_busy(self, busy: bool, preview: bool = False):
         self.btn_start.setEnabled(not busy)
