@@ -103,6 +103,17 @@ def cmd_run(args) -> int:
         print("No tilt-series mdoc files found.")
         return 1
     out_root = Path(args.output)
+    try:
+        import shutil
+        from .pipeline import estimate_output_bytes, is_complete
+        out_root.mkdir(parents=True, exist_ok=True)
+        need = sum(estimate_output_bytes(s, settings) for s in series
+                   if not (settings.skip_existing and is_complete(s, settings, out_root)))
+        free = shutil.disk_usage(out_root).free
+        if need > free:
+            print(f"WARNING: this batch may need ~{need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free")
+    except OSError:
+        pass
     failures = 0
     for i, s in enumerate(series, 1):
         print(f"[{i}/{len(series)}] {s.summary()}")
@@ -124,6 +135,14 @@ def cmd_run(args) -> int:
             failures += 1
             print(f"\r    FAILED: {e}")
     return 1 if failures else 0
+
+
+def cmd_export(args) -> int:
+    from .export import export_tiff
+    out = export_tiff(args.input, args.output, bin_factor=args.bin, bits=16 if args.bits16 else 8,
+                      progress=lambda d, n: print(f"\r  {d}/{n} sections", end="", flush=True))
+    print(f"\r  wrote {out}")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -169,6 +188,13 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="reprocess series that are already complete")
     p.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("export", help="save an MRC stack/tomogram as an ImageJ TIFF (8-bit, pixel size in nm)")
+    p.add_argument("input", help="MRC file")
+    p.add_argument("output", help="TIFF file to write")
+    p.add_argument("--bin", type=int, default=1, help="block-bin by this factor")
+    p.add_argument("--bits16", action="store_true", help="16-bit instead of 8-bit")
+    p.set_defaults(func=cmd_export)
 
     args = ap.parse_args(argv)
     return args.func(args)

@@ -68,8 +68,11 @@ Aligned Stack > Filter / mtffilter), select this file as the dose file.
 
 Everything about the run: pyPrep version, settings, GPU, per-tilt results
 (file, frame count, dose, prior dose, shifts, correlation scores, iterations,
-drift in Å), outputs (path, binning, pixel size, size), missing tilts and — after
-reconstruction — the reconstruction status and tomogram path. The Results page
+drift in Å, mean counts, exposure time, saturated-pixel fraction, QC flags and
+reasons), the QC summary (flagged tilts, intensity fit, saturation), the tilts
+used (`used_tilts`, acquisition indices), outputs (path, binning, pixel size,
+size), missing tilts and — after reconstruction — the reconstruction status and
+tomogram path. The Results page
 and the *skip completed steps* option read it.
 
 ## Reconstruction folder (`imod_bin<N>`)

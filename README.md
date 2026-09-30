@@ -25,8 +25,10 @@ For every tilt series in a session folder, pyPrep:
    You can choose patch tracking or gold fiducials. The result is a normal
    etomo project that you can open and refine.
 
-pyPrep resumes interrupted batches and skips missing tilts. It also shows drift
-plots and the results in its viewer.
+pyPrep flags problem tilts (dark or blocked, drifting, poorly aligned) before
+and after processing, warns about saturated fraction files, resumes interrupted
+batches, and skips missing tilts. Its viewer shows the stacks, tomograms and
+per-tilt drift and QC plots, and exports TIFF for Fiji.
 
 ## Quick start
 

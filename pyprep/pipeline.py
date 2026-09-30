@@ -17,7 +17,7 @@ from typing import Callable
 import numpy as np
 import torch
 
-from . import __version__, gpu
+from . import __version__, gpu, qc
 from .io import mrc
 from .io.frames import open_movie
 from .io.mdoc import Mdoc, MdocSection, PYPREP_TAG, write_mdoc
@@ -65,6 +65,30 @@ def planned_outputs(series: TiltSeries, settings: ProcessingSettings, out_dir: P
     return [StackOutput(k, b, out_dir / stack_name(series.name, k, b)) for k, b in pairs]
 
 
+def estimate_output_bytes(series: TiltSeries, settings: ProcessingSettings) -> int:
+    """Rough disk space a series will need (stacks, plus the IMOD project if reconstructing)."""
+    tilts = [t for t in series.tilts if not t.missing and not t.excluded]
+    if not tilts:
+        return 0
+    try:
+        movie = open_movie(tilts[0].frame_path, settings.input)
+    except Exception:
+        return 0
+    up = int(getattr(movie, "upsampling", 1) or 1)
+    ny, nx = movie.shape[0] // up, movie.shape[1] // up
+    px = 2 if settings.output.dtype == "int16" else 4
+    n = len(tilts)
+    total = sum((nx // o.bin) * (ny // o.bin) * n * px for o in planned_outputs(series, settings, Path(".")))
+    r = settings.recon
+    if r.enabled:
+        b = int(r.bin)
+        stack = (nx // b) * (ny // b) * n * 4
+        thick = max(r.thickness_nm, r.positioning_thickness_nm) * 10 / (series.pixel_size * b)
+        volume = (nx // b) * (ny // b) * thick * 4
+        total += 4 * stack + 3 * volume          # stack copies + aligned stacks; full/trimmed/trial volumes
+    return int(total)
+
+
 def result_json_path(series: TiltSeries, out_dir: Path) -> Path:
     return out_dir / f"{series.name}_pyprep.json"
 
@@ -78,8 +102,11 @@ def is_complete(series: TiltSeries, settings: ProcessingSettings, out_root: Path
         info = json.loads(j.read_text())
     except (OSError, ValueError):
         return False
-    return info.get("status") == "complete" and all(
-        p.path.exists() for p in planned_outputs(series, settings, out_dir))
+    if info.get("status") != "complete":
+        return False
+    if "used_tilts" in info and sorted(info["used_tilts"]) != used_tilt_ids(series, settings):
+        return False                      # tilts were excluded/included since: rebuild
+    return all(p.path.exists() for p in planned_outputs(series, settings, out_dir))
 
 
 def _apply_exclusions(series: TiltSeries, angles) -> None:
@@ -149,10 +176,22 @@ def prepare_movie_context(series: TiltSeries, settings: ProcessingSettings, movi
     return MovieContext(up, series.pixel_size / up, motion, gain, desc)
 
 
-def read_frames(path, settings: ProcessingSettings) -> tuple[np.ndarray, list | None]:
-    """All frames/fractions of one tilt and the raw frame count behind each (EER)."""
+def read_frames(path, settings: ProcessingSettings) -> tuple[np.ndarray, list | None, int | None]:
+    """All frames/fractions of one tilt, the raw frame count behind each (EER), and the
+    pixel value that means 'clipped' for integer fraction files (None if not applicable)."""
     movie = open_movie(path, settings.input)
-    return movie.read(), movie.frame_counts()
+    frames = movie.read()
+    sat = None
+    if not getattr(movie, "is_eer", False):
+        header = getattr(movie, "header", None)
+        sat = qc.saturation_value(frames.dtype, header.mode if header is not None else None)
+    return frames, movie.frame_counts(), sat
+
+
+def used_tilt_ids(series: TiltSeries, settings: ProcessingSettings) -> list[int]:
+    """Acquisition indices of the tilts that go into the stacks with these settings."""
+    _apply_exclusions(series, settings.output.exclude_angles)
+    return sorted(t.zvalue for t in series.usable)
 
 
 def _to_host(img: torch.Tensor, dtype: np.dtype) -> tuple[np.ndarray, tuple]:
@@ -165,6 +204,34 @@ def _to_host(img: torch.Tensor, dtype: np.dtype) -> tuple[np.ndarray, tuple]:
              float(d.sum(dtype=torch.float64)), float((d * d).sum(dtype=torch.float64)))
     host = img.to(torch.int16 if dtype == np.int16 else torch.float32).cpu().numpy()
     return host, stats
+
+
+def _record_qc(record: dict, log) -> None:
+    """Flag suspicious tilts in the series record and log them."""
+    tl = record["tilts"]
+    if not tl:
+        return
+    flags, fit = qc.flag_tilts([t["angle"] for t in tl],
+                               intensity=[t["mean_counts"] / t["exposure"] for t in tl],
+                               drift=[t["drift_A"] for t in tl], scores=[float(np.mean(t["scores"])) for t in tl],
+                               converged=[t["converged"] for t in tl])
+    for t, f in zip(tl, flags):
+        t["flags"], t["flag_detail"] = f.flags, f.detail
+        if f.flags:
+            log.warning(f"QC: tilt {t['acquisition'] + 1:03d} ({t['angle']:+.2f} deg): " + "; ".join(
+                [*f.detail, *[x for x in f.flags if x == "not converged"]]))
+    sats = [t["saturated"] for t in tl if t.get("saturated") is not None]
+    record["qc"] = {"flagged": sum(bool(f.flags) for f in flags),
+                    "excludable": [t["acquisition"] for t, f in zip(tl, flags) if f.excludable],
+                    "intensity_fit": None if fit is None else {"a": fit.a, "b": fit.b, "offset": fit.offset,
+                                                                "spread": fit.spread},
+                    "saturation": float(np.median(sats)) if sats else None}
+    if sats and np.median(sats) > qc.SATURATION_WARN:
+        log.warning(f"QC: fraction files are saturated - {100 * np.median(sats):.1f}% of pixels at the "
+                    f"maximum 8-bit value (median over tilts). Counts above it were clipped at acquisition; "
+                    f"saving fractions as 16-bit (or more, shorter fractions) avoids this.")
+    if not record["qc"]["flagged"]:
+        log.info("QC: no tilts flagged")
 
 
 def write_rawtlt(path: Path, angles) -> None:
@@ -275,7 +342,7 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
                     raise Cancelled()
                 progress(z, len(tilts), f"Tilt {z + 1}/{len(tilts)} ({t.angle:+.1f} deg)")
                 t0 = time.perf_counter()
-                frames, frame_counts = pending.result()
+                frames, frame_counts, sat_value = pending.result()
                 if z + 1 < len(tilts):
                     pending = read_pool.submit(read_frames, tilts[z + 1].frame_path, settings)
                 t1 = time.perf_counter()
@@ -308,7 +375,11 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
                     "z": z, "acquisition": t.zvalue, "angle": t.angle, "file": t.frame_path.name,
                     "frames": int(len(frames)), "prior_dose": t.prior_dose, "dose": t.exposure_dose,
                     "shifts_px": np.round(shifts_phys, 3).tolist(), "scores": np.round(res.scores, 4).tolist(),
-                    "iterations": res.iterations, "converged": res.converged, "drift_A": round(drift, 2)})
+                    "iterations": res.iterations, "converged": res.converged, "drift_A": round(drift, 2),
+                    "mean_counts": round(float(frames.mean(dtype=np.float64)) * len(frames), 4),
+                    "exposure": qc.exposure_norm(t),
+                    "saturated": (round(float(np.count_nonzero(frames == sat_value)) / frames.size, 6)
+                                  if sat_value is not None else None)})
                 flag = "" if res.converged else "  (not converged)"
                 log.info(f"z {z:2d}  {t.angle:+7.2f} deg  {t.frame_path.name}  {len(frames)} frames  "
                          f"drift {drift:6.2f} A  score {res.scores.mean():.3f}  "
@@ -335,6 +406,8 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
             cw = csv.writer(f)
             cw.writerow(["z", "acquisition", "angle", "frame", "dx_px", "dy_px"])
             cw.writerows(motion_rows)
+        _record_qc(record, log)
+        record["used_tilts"] = sorted(t.zvalue for t in tilts)
         record["missing"] = [{"acquisition": t.zvalue, "angle": t.angle,
                               "file": t.section.get("SubFramePath")} for t in series.missing]
         record["status"] = "complete"
@@ -370,6 +443,8 @@ def recon_complete(series: TiltSeries, settings: ProcessingSettings, out_root) -
     try:
         rec = json.loads(j.read_text())
     except (OSError, ValueError):
+        return False
+    if "used_tilts" in rec and sorted(rec["used_tilts"]) != used_tilt_ids(series, settings):
         return False
     return (rec.get("status") == "complete" and rec.get("preset") == settings.recon.preset
             and rec.get("tomogram") and Path(rec["tomogram"]).exists())
@@ -415,6 +490,10 @@ def reconstruct_series(series: TiltSeries, settings: ProcessingSettings, out_roo
     try:
         info = json.loads(j.read_text())
         info["reconstruction"] = {k: v for k, v in rec.items() if k != "directives"}
+        if "used_tilts" in info and rec.get("recon_dir"):
+            rec["used_tilts"] = info["used_tilts"]
+            info["reconstruction"]["used_tilts"] = info["used_tilts"]
+            (Path(rec["recon_dir"]) / "pyprep_recon.json").write_text(json.dumps(rec, indent=1))
         j.write_text(json.dumps(info, indent=1))
     except (OSError, ValueError):
         pass

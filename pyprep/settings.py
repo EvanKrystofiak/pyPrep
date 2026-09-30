@@ -76,3 +76,42 @@ class ProcessingSettings:
     @classmethod
     def load(cls, path) -> "ProcessingSettings":
         return cls.from_dict(json.loads(Path(path).read_text()))
+
+
+# ---------------------------------------------------------------------- presets
+def presets_dir() -> Path:
+    import os
+    base = Path(os.environ.get("APPDATA", Path.home())) / "pyPrep" / "presets"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _preset_file(name: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in " -_()." else "_" for c in name).strip() or "preset"
+    return presets_dir() / f"{safe}.json"
+
+
+def list_presets() -> list[str]:
+    """Saved presets (names), plus the built-in ones on first use."""
+    d = presets_dir()
+    if not any(d.glob("*.json")):
+        ProcessingSettings().save(_preset_file("Tomo5 K3 fractions (default)"))
+        eer = ProcessingSettings()
+        eer.input.eer_fractions = 10
+        eer.input.gain_mode = "auto"
+        eer.save(_preset_file("Falcon EER (set the gain reference)"))
+    return sorted(p.stem for p in d.glob("*.json"))
+
+
+def save_preset(name: str, settings: ProcessingSettings) -> Path:
+    path = _preset_file(name)
+    settings.save(path)
+    return path
+
+
+def load_preset(name: str) -> ProcessingSettings:
+    return ProcessingSettings.load(_preset_file(name))
+
+
+def delete_preset(name: str) -> None:
+    _preset_file(name).unlink(missing_ok=True)

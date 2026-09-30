@@ -10,12 +10,13 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QThread
 from PySide6.QtGui import QAction, QBrush, QColor, QIcon
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog, QFileDialog,
+                               QSystemTrayIcon,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSplitter,
                                QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import __version__, gpu, imod
-from ..pipeline import is_complete, recon_complete
+from .. import __version__, gpu, imod, qc
+from ..pipeline import estimate_output_bytes, is_complete, recon_complete
 from ..settings import ProcessingSettings
 from ..tiltseries import TiltSeries, find_mdocs, load_tilt_series
 from . import theme
@@ -36,7 +37,8 @@ NAV = [
 STATUS_COLORS = {"done": theme.OK, "running": theme.ACCENT_Hi, "failed": theme.DANGER,
                  "cancelled": theme.WARNING, "queued": theme.TEXT_DIM, "ready": theme.TEXT_DIM,
                  "-": theme.TEXT_DIM, "no frames": theme.DANGER}
-COL_NAME, COL_TILTS, COL_MISSING, COL_RANGE, COL_PIXEL, COL_STACKS, COL_TOMO, COL_TIME = range(8)
+COL_NAME, COL_TILTS, COL_MISSING, COL_QC, COL_RANGE, COL_PIXEL, COL_STACKS, COL_TOMO, COL_TIME = range(9)
+T_USE, T_ACQ, T_ANGLE, T_DOSE, T_PRIOR, T_QC, T_FILE = range(7)
 
 
 def _item(text, align_right=False) -> QTableWidgetItem:
@@ -144,6 +146,8 @@ class MainWindow(QMainWindow):
         self._on_done = None
         self._preview_series = None
         self._batch: dict | None = None
+        self._prerun: dict = {}
+        self._tray = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -264,8 +268,8 @@ class MainWindow(QMainWindow):
         c = card()
         cl = QVBoxLayout(c)
         cl.setContentsMargins(12, 12, 12, 12)
-        self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels(["Tilt series", "Tilts", "Missing", "Range (deg)",
+        self.table = QTableWidget(0, 9)
+        self.table.setHorizontalHeaderLabels(["Tilt series", "Tilts", "Missing", "QC", "Range (deg)",
                                               "Pixel (A)", "Stacks", "Tomogram", "Time"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -274,7 +278,7 @@ class MainWindow(QMainWindow):
         self.table.setShowGrid(False)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
-        for col in range(1, 8):
+        for col in range(1, 9):
             hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self._series_selected)
         cl.addWidget(self.table, 1)
@@ -296,22 +300,28 @@ class MainWindow(QMainWindow):
         cl.addWidget(self.tilts_title)
         self.tilts_label = dim_label("Select a tilt series.")
         cl.addWidget(self.tilts_label)
-        self.tilt_table = QTableWidget(0, 6)
-        self.tilt_table.setHorizontalHeaderLabels(["Use", "Acq #", "Angle", "Dose", "Prior dose", "Fraction file"])
+        self.tilt_table = QTableWidget(0, 7)
+        self.tilt_table.setHorizontalHeaderLabels(["Use", "Acq #", "Angle", "Dose", "Prior dose", "QC",
+                                                   "Fraction file"])
         self.tilt_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tilt_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tilt_table.setAlternatingRowColors(True)
         self.tilt_table.setShowGrid(False)
         self.tilt_table.verticalHeader().hide()
         hh = self.tilt_table.horizontalHeader()
-        for col in range(5):
+        for col in range(T_FILE):
             hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(5, QHeaderView.Stretch)
+        hh.setSectionResizeMode(T_FILE, QHeaderView.Stretch)
         self.tilt_table.itemChanged.connect(self._tilt_toggled)
         cl.addWidget(self.tilt_table, 1)
         row = QHBoxLayout()
         row.addWidget(dim_label("Select a tilt, then test the alignment settings on it.", wrap=False))
         row.addStretch()
+        self.btn_exclude = QPushButton("Exclude flagged tilts")
+        self.btn_exclude.setToolTip("Untick tilts flagged as dark, drifting or poorly aligned\n"
+                                    "(hover over a QC entry to see why it was flagged).")
+        self.btn_exclude.clicked.connect(self.exclude_flagged)
+        row.addWidget(self.btn_exclude)
         self.btn_preview = QPushButton("Test on one tilt")
         self.btn_preview.setObjectName("toolButton")
         self.btn_preview.clicked.connect(self.preview)
@@ -405,8 +415,13 @@ class MainWindow(QMainWindow):
                     self.append_log(f"Could not read {m}: {e}")
         finally:
             QApplication.restoreOverrideCursor()
+        self._prerun = {ts.name: qc.prerun_flags(ts) for ts in self.series}
         self._fill_table()
         self.append_log(f"Found {len(self.series)} tilt series in {folder}")
+        for ts in self.series:
+            n = sum(f.excludable for f in self._prerun[ts.name].values())
+            if n:
+                self.append_log(f"  {ts.name}: {n} tilt(s) flagged from the mdoc (see the QC column)")
         for ts in self.series:
             if ts.missing:
                 self.append_log(f"  {ts.name}: {len(ts.missing)} fraction file(s) missing - those tilts will be skipped")
@@ -432,6 +447,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, COL_RANGE, _item(f"{min(angles):+.0f} to {max(angles):+.0f}" if angles else "-"))
             self.table.setItem(r, COL_PIXEL, _item(f"{ts.pixel_size:.3f}", True))
             self.table.setItem(r, COL_TIME, _item("", True))
+            self._update_qc_cell(r)
         self._refresh_status()
         self.series_count.setText(f"{len(self.series)} tilt series")
 
@@ -450,6 +466,65 @@ class MainWindow(QMainWindow):
             else:
                 tomo = out_root is not None and recon_complete(ts, s, out_root)
                 self._set_cell(r, COL_TOMO, "done" if tomo else "ready")
+
+    # ------------------------------------------------------------------ QC
+    def _series_record(self, ts) -> dict | None:
+        out_root = self.top.output.path()
+        if out_root is None:
+            return None
+        j = out_root / ts.name / f"{ts.name}_pyprep.json"
+        try:
+            return json.loads(j.read_text()) if j.exists() else None
+        except (OSError, ValueError):
+            return None
+
+    def _tilt_qc(self, ts) -> tuple[dict, float | None]:
+        """{acquisition index: (flags, details)} from the mdoc, overridden by processing results;
+        and the series' saturation fraction if measured."""
+        out = {z: (list(f.flags), list(f.detail)) for z, f in self._prerun.get(ts.name, {}).items()}
+        rec = self._series_record(ts)
+        sat = None
+        if rec and rec.get("status") == "complete":
+            for t in rec.get("tilts", []):
+                if "flags" in t:
+                    out[t["acquisition"]] = (list(t["flags"]), list(t.get("flag_detail", [])))
+            sat = (rec.get("qc") or {}).get("saturation")
+        return out, sat
+
+    def _update_qc_cell(self, row: int):
+        ts = self.series[row]
+        flags, sat = self._tilt_qc(ts)
+        active = {t.zvalue for t in ts.tilts if not t.missing and not t.excluded}
+        n = sum(any(f in qc.EXCLUDABLE for f in fl) for z, (fl, _) in flags.items() if z in active)
+        parts = [f"{n} flagged" if n else ("ok" if flags else "-")]
+        saturated = sat is not None and sat > qc.SATURATION_WARN
+        if saturated:
+            parts.append(f"sat {100 * sat:.1f}%")
+        it = _item("  ·  ".join(parts))
+        it.setForeground(QBrush(QColor(theme.WARNING if (n or saturated) else
+                                       (theme.OK if flags else theme.TEXT_DIM))))
+        tips = []
+        if n:
+            tips.append(f"{n} tilt(s) look dark, drifted or poorly aligned - see the QC column of the tilt list")
+        if saturated:
+            tips.append(f"{100 * sat:.1f}% of fraction pixels are clipped at the 8-bit maximum")
+        it.setToolTip("\n".join(tips) or "no problems found")
+        self.table.setItem(row, COL_QC, it)
+
+    def exclude_flagged(self):
+        r, ts = self._current_series()
+        if ts is None:
+            return
+        flags, _ = self._tilt_qc(ts)
+        hit = [t for t in ts.tilts if not t.missing and not t.excluded
+               and any(f in qc.EXCLUDABLE for f in flags.get(t.zvalue, ([], []))[0])]
+        for t in hit:
+            t.excluded = True
+        angles = ", ".join(f"{t.angle:+.1f}" for t in sorted(hit, key=lambda t: t.angle))
+        self.append_log(f"{ts.name}: excluded {len(hit)} flagged tilt(s)" + (f": {angles}" if hit else ""))
+        self._fill_tilt_table(ts)
+        self._update_qc_cell(r)
+        self._refresh_status()
 
     def _set_cell(self, row: int, col: int, status: str, extra: str = ""):
         it = _item(status + (f" {extra}" if extra else ""))
@@ -477,6 +552,15 @@ class MainWindow(QMainWindow):
         r, ts = self._current_series()
         if ts is None:
             return
+        self._fill_tilt_table(ts)
+        out_root = self.top.output.path()
+        if out_root is not None:
+            self.results.load_series(out_root / ts.name)
+        else:
+            self.results.clear()
+
+    def _fill_tilt_table(self, ts):
+        flags, _ = self._tilt_qc(ts)
         self.tilt_table.blockSignals(True)
         self.tilt_table.setRowCount(len(ts.tilts))
         for i, t in enumerate(sorted(ts.tilts, key=lambda t: t.angle)):
@@ -489,23 +573,27 @@ class MainWindow(QMainWindow):
                 use.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
                 use.setCheckState(Qt.Unchecked if t.excluded else Qt.Checked)
             use.setData(Qt.UserRole, t.zvalue)
-            self.tilt_table.setItem(i, 0, use)
-            self.tilt_table.setItem(i, 1, _item(f"{t.zvalue + 1:03d}", True))
-            self.tilt_table.setItem(i, 2, _item(f"{t.angle:+.2f}", True))
-            self.tilt_table.setItem(i, 3, _item(f"{t.exposure_dose:.2f}", True))
-            self.tilt_table.setItem(i, 4, _item(f"{t.prior_dose:.2f}", True))
+            self.tilt_table.setItem(i, T_USE, use)
+            self.tilt_table.setItem(i, T_ACQ, _item(f"{t.zvalue + 1:03d}", True))
+            self.tilt_table.setItem(i, T_ANGLE, _item(f"{t.angle:+.2f}", True))
+            self.tilt_table.setItem(i, T_DOSE, _item(f"{t.exposure_dose:.2f}", True))
+            self.tilt_table.setItem(i, T_PRIOR, _item(f"{t.prior_dose:.2f}", True))
+            fl, detail = flags.get(t.zvalue, ([], []))
+            q = _item(", ".join(fl) if fl else ("ok" if flags else ""))
+            if fl:
+                q.setForeground(QBrush(QColor(theme.WARNING if any(f in qc.EXCLUDABLE for f in fl)
+                                              else theme.TEXT_DIM)))
+                q.setToolTip("\n".join(detail) or ", ".join(fl))
+            else:
+                q.setForeground(QBrush(QColor(theme.OK)))
+            self.tilt_table.setItem(i, T_QC, q)
             f = _item(t.frame_path.name if t.frame_path else (t.section.get("SubFramePath") or "?"))
             if t.missing:
                 f.setForeground(QBrush(QColor(theme.WARNING)))
-            self.tilt_table.setItem(i, 5, f)
+            self.tilt_table.setItem(i, T_FILE, f)
         self.tilt_table.blockSignals(False)
         self.tilts_title.setText(f"Tilts in {ts.name}")
         self.tilts_label.setText(ts.summary() + (f"  ·  fractions from {ts.frames_dir}" if ts.frames_dir else ""))
-        out_root = self.top.output.path()
-        if out_root is not None:
-            self.results.load_series(out_root / ts.name)
-        else:
-            self.results.clear()
 
     def _tilt_toggled(self, item: QTableWidgetItem):
         if item.column() != 0:
@@ -517,6 +605,9 @@ class MainWindow(QMainWindow):
         for t in ts.tilts:
             if t.zvalue == z and not t.missing:
                 t.excluded = item.checkState() != Qt.Checked
+        r, _ = self._current_series()
+        self._update_qc_cell(r)
+        self._refresh_status()
 
     # ------------------------------------------------------------------ preview / directives
     def preview(self):
@@ -596,6 +687,8 @@ class MainWindow(QMainWindow):
         settings = self.forms.get_settings()
         settings.frames_dir = str(self.frames_path.path()) if self.frames_path.path() else None
         out_root.mkdir(parents=True, exist_ok=True)
+        if not self._enough_disk(jobs, settings, out_root):
+            return
         settings.save(out_root / "pyprep_settings_last_run.json")
         self._save_state()
         for r, _ in jobs:
@@ -617,6 +710,38 @@ class MainWindow(QMainWindow):
         worker.series_finished.connect(self._on_series_finished)
         worker.log.connect(self.append_log)
         self._run_in_thread(worker, on_done=self._batch_done)
+
+    def _enough_disk(self, jobs, settings, out_root) -> bool:
+        """Warn before starting if the output drive looks too small for the batch."""
+        import shutil
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            need = sum(estimate_output_bytes(ts, settings) for _, ts in jobs
+                       if not (settings.skip_existing and is_complete(ts, settings, out_root)))
+            free = shutil.disk_usage(out_root).free
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.append_log(f"Estimated output size {need / 1e9:.1f} GB; {free / 1e9:.1f} GB free on {out_root.anchor}")
+        if need <= free:
+            return True
+        return QMessageBox.question(
+            self, "pyPrep - disk space",
+            f"This batch may need about {need / 1e9:.1f} GB, but only {free / 1e9:.1f} GB is free on "
+            f"{out_root.anchor}.\n\nChoose int16 output, fewer binning levels, or another output folder "
+            f"to save space.\n\nStart anyway?") == QMessageBox.Yes
+
+    def _notify(self, text: str, ok: bool):
+        """Windows notification (useful for overnight batches), plus the taskbar flash."""
+        QApplication.alert(self)
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        if self._tray is None:
+            self._tray = QSystemTrayIcon(QApplication.windowIcon(), self)
+            self._tray.setToolTip("pyPrep")
+            self._tray.messageClicked.connect(lambda: (self.showNormal(), self.activateWindow()))
+        self._tray.show()
+        self._tray.showMessage("pyPrep", text, QSystemTrayIcon.Information if ok else QSystemTrayIcon.Warning,
+                               15000)
 
     def cancel(self):
         if self._worker is not None and hasattr(self._worker, "cancel"):
@@ -656,8 +781,10 @@ class MainWindow(QMainWindow):
             self._batch["last_row"] = row
             if res.get("stacks") not in ("complete", "skipped") or res.get("recon") in ("failed", "cancelled"):
                 self._batch["failed"].append(self.series[row].name)
+        self._update_qc_cell(row)
         r, ts = self._current_series()
         if r == row and self.top.output.path():
+            self._fill_tilt_table(ts)
             self.results.load_series(self.top.output.path() / ts.name, prefer="tomo")
 
     def _batch_done(self):
@@ -665,19 +792,20 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
         b = self._batch or {"t0": time.monotonic(), "jobs": 0, "failed": [], "last_row": None, "cancelled": False}
         self._batch = None
-        minutes = (time.monotonic() - b["t0"]) / 60
+        secs = time.monotonic() - b["t0"]
+        took = f"{secs:.0f} s" if secs < 90 else f"{secs / 60:.1f} min"
         n, failed = b["jobs"], b["failed"]
         if b["cancelled"]:
-            text, color = f"Cancelled after {minutes:.1f} min", theme.WARNING
+            text, color = f"Cancelled after {took}", theme.WARNING
         elif failed:
-            text, color = f"Finished in {minutes:.1f} min - {len(failed)} of {n} series had problems", theme.DANGER
+            text, color = f"Finished in {took} - {len(failed)} of {n} series had problems", theme.DANGER
         else:
-            text, color = f"Finished {n} series in {minutes:.1f} min", theme.OK
+            text, color = f"Finished {n} series in {took}", theme.OK
         self.run_msg.setText(text)
         self.run_msg.setStyleSheet(f"color: {color}; font-weight: 700;")
         self.append_log(f"===== Batch finished: {text}" + (f" ({', '.join(failed)})" if failed else "") + " =====")
         self.statusBar().showMessage(text)
-        QApplication.alert(self)          # flash the taskbar button if pyPrep is in the background
+        self._notify(text, ok=not failed and not b["cancelled"])
         if not b["cancelled"] and b["last_row"] is not None and self.top.output.path():
             r, _ = self._current_series()
             row = r if r is not None else b["last_row"]
@@ -691,6 +819,7 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setEnabled(busy and not preview)
         self.top.scan_btn.setEnabled(not busy)
         self.btn_preview.setEnabled(not busy)
+        self.btn_exclude.setEnabled(not busy)
         self.forms.preview_button_alignment.setEnabled(not busy)
         self.forms.set_enabled(not busy)
         if not busy:
@@ -721,9 +850,8 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
     theme.apply_theme(app)
-    icon = Path(__file__).with_name("pyprep.ico")
-    if icon.exists():
-        app.setWindowIcon(QIcon(str(icon)))
+    from .launcher import set_app_identity
+    set_app_identity(app)
     w = MainWindow()
     w.show()
     return app.exec()

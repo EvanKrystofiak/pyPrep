@@ -100,10 +100,26 @@ def _error_log_path() -> Path:
     return base / "startup_error.log"
 
 
+def set_app_identity(app) -> None:
+    """Window/taskbar icon; on Windows also an AppUserModelID so the taskbar shows
+    pyPrep's icon instead of Python's."""
+    from PySide6.QtGui import QIcon
+    icon = Path(__file__).with_name("pyprep.ico")
+    if icon.exists():
+        app.setWindowIcon(QIcon(str(icon)))
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("pyPrep.pyPrep")
+        except Exception:
+            pass
+
+
 def main() -> int:
     t0 = time.perf_counter()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("pyPrep")
+    set_app_identity(app)
     splash = Splash()
     splash.show()
     splash.set_step("Starting…", 0.03)

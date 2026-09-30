@@ -59,15 +59,44 @@ After **Find tilt series**, the upper table lists every tilt series:
 |---|---|
 | Tilt series | name (from the `.mdoc`); the checkbox selects it for processing |
 | Tilts / Missing | tilts in the mdoc / tilts whose fraction file was not found |
+| QC | number of tilts flagged by [quality control](#quality-control), and `sat x%` if the fraction files are saturated |
 | Range, Pixel | tilt range (degrees) and pixel size (Å) from the mdoc |
 | Stacks | `ready`, `queued`, `running n/N`, `done`, `failed` |
 | Tomogram | the same for the IMOD reconstruction (`-` if reconstruction is off) |
 | Time | processing time of the last run |
 
 Select a series to see its tilts in the lower table, sorted by tilt angle, with
-the acquisition number, dose, dose received before the tilt, and the fraction
-file (missing files in yellow). **Untick a tilt** to leave it out of this
-series' stacks (e.g. a tilt blocked by a grid bar).
+the acquisition number, dose, dose received before the tilt, QC flags (hover
+for the reason) and the fraction file (missing files in yellow). **Untick a
+tilt** to leave it out of this series' stacks (e.g. a tilt blocked by a grid
+bar), or press **Exclude flagged tilts**. Changing which tilts are used marks
+the series' stacks and tomogram as out of date, so the next **Start** rebuilds
+them.
+
+### Quality control
+
+pyPrep flags tilts that would degrade a reconstruction:
+
+| Flag | Meaning | Checked |
+|---|---|---|
+| `dark` | much less intensity than expected for its tilt angle — grid bar, lamella edge, contamination, thick ice | from the mdoc when the series is found, and again from the data after processing |
+| `bright` | much more intensity than expected (e.g. the beam partly over a hole) — informational | same |
+| `drift` | frame drift far above the rest of the series | after processing |
+| `low score` | frame alignment correlation below half the series median | after processing |
+| `not converged` | frame alignment hit the iteration limit — informational | after processing |
+
+The expected intensity follows the specimen thickness along the beam, which
+grows as 1/cos(tilt); pyPrep fits this (allowing for a tilted specimen) and
+flags tilts more than ~15 % below it. Flagged tilts are *not* removed
+automatically — **Exclude flagged tilts** unticks the `dark`, `drift` and
+`low score` ones. The Results page plots the intensity of every tilt against
+the fitted curve.
+
+pyPrep also reports **saturation**: Tomo5 can save 8-bit fraction files, which
+clip any pixel that receives more than ~8 electrons in one fraction. If more
+than 0.5 % of pixels are at 255, the QC column shows `sat x%` and the log
+explains. The counts lost cannot be recovered; save fractions as 16-bit, or use
+more, shorter fractions, at the microscope.
 
 **Test on one tilt** aligns the selected tilt (or the one nearest 0° if none is
 selected) with the current settings and shows unaligned vs aligned on the
@@ -114,8 +143,11 @@ EER data to check the gain reference.
 | Skip steps whose outputs are already complete | on | Re-running a batch skips finished stacks/tomograms, so an interrupted batch resumes. Turn off to redo everything. |
 | Fallback dose per tilt | 0 | Used only for dose weighting when the mdoc has no `ExposureDose`. |
 
-**Settings file**: *Save settings* writes all pages to a JSON file you can load
-later or give to the command line (`--settings`).
+**Presets and settings files**: a *preset* stores the settings of all pages
+under a name — for example one per microscope and camera. Pick a preset and
+press *Apply*, or *Save as preset…* to store the current settings (presets live
+in `%APPDATA%\pyPrep\presets`). *Save settings* writes the same thing to a
+JSON file you can share or give to the command line (`--settings`).
 
 ## Reconstruction page
 
@@ -155,12 +187,14 @@ names are listed in `IMOD\com\directives.csv`.
 
 1. Tick the series to process on the Tilt series page (**Check all** /
    **Uncheck all**).
-2. Press **Start** (bottom left). The app switches to the Log page; progress is
+2. Press **Start** (bottom left). pyPrep first estimates the disk space the
+   batch needs and warns if the output drive is too full. The app switches to the Log page; progress is
    shown in the Batch panel and in the table's Stacks/Tomogram columns.
 3. **Cancel** stops after the current tilt (or stops IMOD).
 4. When the batch ends, the Batch panel shows *Finished N series in X min*
-   (green) or which series had problems (red), the taskbar button flashes, and
-   the Results page opens on the tomogram.
+   (green) or which series had problems (red), the taskbar button flashes, a
+   Windows notification appears (useful for overnight batches), and the
+   Results page opens on the tomogram.
 
 The settings of each run are saved as `pyprep_settings_last_run.json` in the
 output folder.
@@ -179,11 +213,14 @@ speed.
   stacks are shown reduced for speed.
 - The slider under the image steps through tilts (labelled with the tilt
   angle) or tomogram slices. The histogram on the right sets the contrast.
-- **Drift per tilt**: total path length of the frame trajectory for each tilt.
-  Click a point to jump to that tilt.
+- **Drift / Intensity / Alignment score per tilt** (selector above the plot):
+  frame drift, intensity against the expected curve (QC), or the frame
+  alignment score. Flagged tilts are red. Click a point to jump to that tilt.
 - **Frame trajectory**: the per-frame shifts of the current tilt (square = first
   frame), in Å.
 - **Open in 3dmod**, **Open in etomo** (the batchruntomo project), **Open folder**.
+- **Export TIFF…** saves the shown stack or tomogram as an 8-bit ImageJ TIFF
+  with the pixel size in nm, for Fiji and segmentation tools.
 
 After **Test on one tilt**, the slider shows the unaligned (0) and aligned (1)
 sums of that tilt.

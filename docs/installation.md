@@ -55,7 +55,8 @@ It will:
 3. install PyTorch with CUDA (about 2.5 GB download),
 4. install pyPrep and its other dependencies (NumPy, SciPy, PySide6, pyqtgraph,
    tifffile, imagecodecs, pytest),
-5. print the GPU it found.
+5. create **pyPrep shortcuts** on the Desktop and in the Start menu,
+6. print the GPU it found.
 
 The last line should read something like:
 
@@ -95,11 +96,14 @@ installer) or at `C:\Program Files\IMOD`. It runs IMOD's scripts with the same
 
 ## 5. Start pyPrep
 
-Double-click **`pyPrep.bat`**. A splash screen appears within a couple of
+Use the **pyPrep** shortcut on the Desktop or in the Start menu (or
+double-click `pyPrep.bat`). A splash screen appears within a couple of
 seconds while the libraries load (the first start after installing or rebooting
 can take ~30 s on a hard disk).
 
-Tip: right-click `pyPrep.bat` > **Send to > Desktop (create shortcut)**.
+To recreate the shortcuts (e.g. after moving the folder):
+`env\python.exe scripts\make_shortcut.py`. To skip them during installation,
+run `set PYPREP_NO_SHORTCUT=1` before `install.bat`.
 
 ## Checking the installation (optional)
 
@@ -120,9 +124,10 @@ install.bat
 
 ## Uninstalling
 
-Delete the pyPrep folder. pyPrep stores only window layout and last-used
-settings in the Windows registry (`HKEY_CURRENT_USER\Software\pyPrep`) and a
-startup error log (if any) in `%LOCALAPPDATA%\pyPrep`.
+Delete the pyPrep folder and the two **pyPrep** shortcuts (Desktop, Start menu).
+pyPrep also stores window layout and last-used settings in the Windows registry
+(`HKEY_CURRENT_USER\Software\pyPrep`), saved presets in `%APPDATA%\pyPrep`,
+and a startup error log (if any) in `%LOCALAPPDATA%\pyPrep`.
 
 ## Manual installation
 

@@ -61,6 +61,21 @@ orientation the aligned image shows no detector pattern.
 For Tomo5 K3 fractions, leave the gain reference empty — they are already
 gain-normalized.
 
+## Tilts are flagged by QC
+
+Hover over the QC entry for the reason. A `dark` tilt is usually blocked
+(grid bar, lamella edge) or contaminated — check it in 3dmod and exclude it.
+A few flags at the highest tilts of a thick specimen can be normal. Flags are
+advisory; nothing is excluded unless you untick the tilt or press
+**Exclude flagged tilts**.
+
+## "fraction files are saturated"
+
+8-bit fraction files (a Tomo5 option) clip pixels that receive more than about
+8 electrons in one fraction. A few percent is common at low tilt. It cannot be
+undone in processing; to avoid it, save fractions as 16-bit or use more
+fractions per tilt.
+
 ## Frame alignment finds almost no drift
 
 Many tilt series move only a few Å during each exposure; alignment then makes

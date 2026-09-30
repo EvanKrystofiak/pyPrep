@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBo
 from .. import gpu, imod
 from ..imod import ReconSettings
 from ..motion import MotionSettings
-from ..settings import InputSettings, OutputSettings, ProcessingSettings
+from ..settings import (InputSettings, OutputSettings, ProcessingSettings, delete_preset, list_presets,
+                        load_preset, save_preset)
 from . import theme
 from .theme import card, dim_label, section_label, title_label
 
@@ -243,8 +244,22 @@ class SettingsForms(QObject):
         f.addRow("Fallback dose per tilt", self.default_dose)
         lay.addWidget(c)
 
-        c, v, f = _card_with_form("Settings file", "Save these settings (all pages) to reuse them, "
-                                                   "or to run the same job from the command line.")
+        c, v, f = _card_with_form("Presets and settings files",
+                                  "A preset stores the settings of all pages under a name, e.g. one per "
+                                  "microscope or camera. Settings files can also be given to the command line.")
+        prow = QHBoxLayout()
+        self.preset_combo = QComboBox()
+        self.preset_combo.setMinimumWidth(320)
+        prow.addWidget(QLabel("Preset:"))
+        prow.addWidget(self.preset_combo)
+        for text, slot in (("Apply", self._apply_preset), ("Save as preset…", self._save_preset),
+                           ("Delete", self._delete_preset)):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            prow.addWidget(b)
+        prow.addStretch()
+        v.addLayout(prow)
+        self._refresh_presets()
         row = QHBoxLayout()
         for text, slot in (("Load settings...", self.load_dialog), ("Save settings...", self.save_dialog),
                            ("Reset to defaults", lambda: self.set_settings(ProcessingSettings()))):
@@ -513,6 +528,34 @@ class SettingsForms(QObject):
     def set_enabled(self, enabled: bool):
         for p in (self.alignment_page, self.outputs_page, self.recon_page):
             p.setEnabled(enabled)
+
+    def _refresh_presets(self, select: str | None = None):
+        self.preset_combo.clear()
+        self.preset_combo.addItems(list_presets())
+        if select:
+            self.preset_combo.setCurrentText(select)
+
+    def _apply_preset(self):
+        name = self.preset_combo.currentText()
+        if name:
+            try:
+                self.set_settings(load_preset(name))
+            except Exception as e:
+                QMessageBox.warning(None, "pyPrep", f"Could not load preset '{name}':\n{e}")
+
+    def _save_preset(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(None, "Save preset", "Preset name (e.g. microscope and camera):",
+                                        text=self.preset_combo.currentText())
+        if ok and name.strip():
+            save_preset(name.strip(), self.get_settings())
+            self._refresh_presets(select=name.strip())
+
+    def _delete_preset(self):
+        name = self.preset_combo.currentText()
+        if name and QMessageBox.question(None, "pyPrep", f"Delete preset '{name}'?") == QMessageBox.Yes:
+            delete_preset(name)
+            self._refresh_presets()
 
     def load_dialog(self):
         path, _ = QFileDialog.getOpenFileName(None, "Load settings", "", "pyPrep settings (*.json)")

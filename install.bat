@@ -55,11 +55,14 @@ echo Installing PyTorch %TORCH_VERSION% (%TORCH_VARIANT%) - about 2.5 GB for CUD
 rem ---- pyPrep and its other dependencies ---------------------------------------
 "%PY%" -m pip install -e ".[test]" || goto :fail
 
+rem ---- shortcuts (Desktop + Start menu); set PYPREP_NO_SHORTCUT=1 to skip -----
+if not "%PYPREP_NO_SHORTCUT%"=="1" "%PY%" "%~dp0scripts\make_shortcut.py"
+
 rem ---- check -------------------------------------------------------------------
 echo.
 "%PY%" -c "import torch, pyprep, imagecodecs, PySide6; ok = torch.cuda.is_available(); print('pyPrep', pyprep.__version__, '| PyTorch', torch.__version__, '| GPU:', torch.cuda.get_device_name(0) if ok else 'NOT AVAILABLE - pyPrep will run on the CPU (slow)')" || goto :fail
 echo.
-echo  Installation complete. Start pyPrep by double-clicking pyPrep.bat
+echo  Installation complete. Start pyPrep from the desktop shortcut or pyPrep.bat
 echo  (reconstruction also needs IMOD for Windows: https://bio3d.colorado.edu/imod/)
 echo.
 if not "%PYPREP_NOPAUSE%"=="1" pause

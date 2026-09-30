@@ -63,6 +63,25 @@ On a 5760 x 4092 K3 tilt with 4 fractions, alignment takes about 0.15 s and all
 sums about 0.5 s on a Quadro M4000. The shifts agree with IMOD `alignframes` to
 within about 0.03 px.
 
+## Tilt quality control
+
+- **Intensity.** Transmitted intensity per second of exposure falls with the
+  specimen thickness along the beam, `log I = a - b / cos(theta - theta0)`
+  (Beer-Lambert, with `theta0` the specimen's own tilt). A robust fit over the
+  series - `theta0` by grid search minimising a truncated squared error, so a
+  fit cannot "win" by discarding tilts - gives each tilt's expected intensity;
+  tilts more than max(15 %, 5 x the robust spread) below it are `dark`.
+  Before processing this uses the mdoc's `MinMaxMean`, afterwards the measured
+  sums. Intensity is normalised by exposure *time*, not the mdoc
+  `ExposureDose`: Tomo5 derives that dose from the image counts, which would
+  cancel exactly the darkening being detected.
+- **Drift** above max(20 A, median + 8 MAD), **alignment score** below half the
+  series median, and non-convergence are flagged after processing.
+- **Saturation**: the fraction of fraction-file pixels at the integer maximum
+  (255 for 8-bit) is reported per series.
+- Stacks and tomograms record the tilts they contain (`used_tilts`); changing
+  exclusions makes them out of date, so they are rebuilt on the next run.
+
 ## Dose weighting
 
 This is the optional `_DW` stack. Each frame is weighted by

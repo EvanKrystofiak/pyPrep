@@ -50,6 +50,7 @@ env\python.exe -m pyprep run session -o out --settings my_settings.json --force
 ```
 
 Series whose outputs are already complete are skipped (use `--force` to redo).
+A warning is printed if the output drive looks too small for the batch.
 The exit code is 0 if every series succeeded, 1 otherwise.
 
 ### Options
@@ -111,6 +112,16 @@ The exit code is 0 if every series succeeded, 1 otherwise.
 |---|---|
 | `--force` | reprocess series that are already complete |
 | `-q`, `--quiet` | print only progress and a summary per series |
+
+## `pyprep export` — TIFF for Fiji / segmentation
+
+```bat
+env\python.exe -m pyprep export "out\TS_01\imod_bin4\TS_01_rec.mrc" TS_01_rec.tif
+env\python.exe -m pyprep export stack.mrc stack.tif --bin 2 --bits16
+```
+
+Writes an ImageJ TIFF scaled between the 0.5 and 99.5 percentiles, with the
+pixel size in nm. `--bin N` block-bins, `--bits16` writes 16-bit.
 
 ## Settings file
 

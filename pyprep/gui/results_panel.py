@@ -61,6 +61,7 @@ class _LoadBridge(QObject):
     """Carries results from loader threads back to the GUI thread (queued signals)."""
     loaded = Signal(int, object)              # request id, (kind, path, volume) or Exception
     progress = Signal(int, int, int)          # request id, sections done, total
+    exported = Signal(object)                 # output path, or Exception
 
 
 def robust_levels(img: np.ndarray) -> tuple[float, float]:
@@ -81,6 +82,7 @@ class ResultsPanel(QWidget):
         self._bridge = _LoadBridge(self)
         self._bridge.loaded.connect(self._on_loaded)
         self._bridge.progress.connect(self._on_load_progress)
+        self._bridge.exported.connect(self._on_exported)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(22, 18, 22, 18)
@@ -103,7 +105,11 @@ class ResultsPanel(QWidget):
         self.btn_etomo.clicked.connect(self._open_etomo)
         self.btn_folder = QPushButton("Open folder")
         self.btn_folder.clicked.connect(self._open_folder)
-        for b in (self.btn_3dmod, self.btn_etomo, self.btn_folder):
+        self.btn_tiff = QPushButton("Export TIFF…")
+        self.btn_tiff.setToolTip("Save the shown stack/tomogram as an 8-bit ImageJ TIFF (pixel size in nm),\n"
+                                 "e.g. for Fiji or segmentation tools.")
+        self.btn_tiff.clicked.connect(self._export_tiff)
+        for b in (self.btn_3dmod, self.btn_etomo, self.btn_tiff, self.btn_folder):
             top.addWidget(b)
         lay.addLayout(top)
         self.loading = QProgressBar()
@@ -126,15 +132,22 @@ class ResultsPanel(QWidget):
         pl = QHBoxLayout(plots)
         pl.setContentsMargins(0, 0, 0, 0)
         accent = pg.mkColor(theme.ACCENT)
-        self.drift_plot = pg.PlotWidget(title="Drift per tilt")
+        self.drift_plot = pg.PlotWidget()
         self.drift_plot.setLabel("bottom", "tilt angle (°)")
-        self.drift_plot.setLabel("left", "total drift (Å)")
         self.drift_plot.showGrid(x=True, y=True, alpha=0.25)
         self.drift_scatter = pg.ScatterPlotItem(size=8, brush=pg.mkBrush(accent), pen=pg.mkPen(None))
         self.drift_scatter.sigClicked.connect(self._drift_clicked)
         self.drift_plot.addItem(self.drift_scatter)
+        self.expected_curve = pg.PlotDataItem(pen=pg.mkPen(theme.TEXT_DIM, width=1, style=Qt.DashLine))
+        self.drift_plot.addItem(self.expected_curve)
         self.drift_marker = pg.InfiniteLine(angle=90, pen=pg.mkPen(theme.WARNING, width=1))
         self.drift_plot.addItem(self.drift_marker)
+        self.plot_kind = QComboBox()
+        self.plot_kind.addItem("Drift per tilt", "drift")
+        self.plot_kind.addItem("Intensity per tilt (QC)", "intensity")
+        self.plot_kind.addItem("Alignment score per tilt", "score")
+        self.plot_kind.setToolTip("Red points are tilts flagged by quality control.")
+        self.plot_kind.currentIndexChanged.connect(self._draw_series_plot)
         self.traj_plot = pg.PlotWidget(title="Frame trajectory")
         self.traj_plot.setLabel("bottom", "x shift (Å)")
         self.traj_plot.setLabel("left", "y shift (Å)")
@@ -146,6 +159,8 @@ class ResultsPanel(QWidget):
             c = card()
             cl = QVBoxLayout(c)
             cl.setContentsMargins(6, 6, 6, 6)
+            if p is self.drift_plot:
+                cl.addWidget(self.plot_kind)
             cl.addWidget(p)
             pl.addWidget(c)
         split.addWidget(plots)
@@ -185,7 +200,9 @@ class ResultsPanel(QWidget):
         tilts = rec.get("tilts", [])
         self._angles = [t["angle"] for t in tilts]
         self._shifts = [np.asarray(t["shifts_px"]) for t in tilts]
-        self.drift_scatter.setData(self._angles, [t["drift_A"] for t in tilts])
+        self._tilt_records = tilts
+        self._qc_fit = (rec.get("qc") or {}).get("intensity_fit")
+        self._draw_series_plot()
         self.stack_combo.blockSignals(True)
         self.stack_combo.clear()
         recon = rec.get("reconstruction") or {}
@@ -260,6 +277,11 @@ class ResultsPanel(QWidget):
         threading.Thread(target=work, name="pyprep-display-load", daemon=True).start()
 
     def _on_load_progress(self, req, done, total):
+        if req == -1:                                # TIFF export
+            self.loading.setRange(0, total)
+            self.loading.setValue(done)
+            self.loading.setFormat("Exporting… %v / %m sections")
+            return
         if req == self._request:
             self.loading.setRange(0, total)
             self.loading.setValue(done)
@@ -298,6 +320,32 @@ class ResultsPanel(QWidget):
         self.traj_plot.setTitle(f"Frame trajectory at {self._angles[ind]:+.1f} deg (square = first frame)")
         self.drift_marker.setValue(self._angles[ind])
 
+    def _draw_series_plot(self):
+        """Drift, QC intensity or alignment score against tilt angle; flagged tilts in red."""
+        tilts = getattr(self, "_tilt_records", None) or []
+        kind = self.plot_kind.currentData()
+        self.expected_curve.setData([], [])
+        if not tilts:
+            return
+        ang = np.array([t["angle"] for t in tilts])
+        if kind == "intensity" and all("mean_counts" in t for t in tilts):
+            y = np.array([t["mean_counts"] / t.get("exposure", 1.0) for t in tilts])
+            label = "counts per second"
+            fit = self._qc_fit
+            if fit:
+                xs = np.linspace(ang.min(), ang.max(), 200)
+                self.expected_curve.setData(xs, np.exp(fit["a"] - fit["b"] / np.cos(np.radians(xs - fit["offset"]))))
+        elif kind == "score":
+            y = np.array([float(np.mean(t["scores"])) for t in tilts])
+            label = "alignment score"
+        else:
+            y = np.array([t["drift_A"] for t in tilts])
+            label = "total drift (Å)"
+        bad = [any(f in ("dark", "drift", "low score") for f in t.get("flags", [])) for t in tilts]
+        brushes = [pg.mkBrush(theme.DANGER if b else theme.ACCENT) for b in bad]
+        self.drift_scatter.setData(ang, y, brush=brushes)
+        self.drift_plot.setLabel("left", label)
+
     def _drift_clicked(self, _item, points, *args):
         if points is not None and len(points) and self._showing_tilts:
             idx = int(np.argmin([abs(a - points[0].pos().x()) for a in self._angles]))
@@ -324,6 +372,8 @@ class ResultsPanel(QWidget):
         self.image.setImage(stack, xvals=np.array([0.0, 1.0]), autoLevels=False,
                             levels=robust_levels(res["aligned"]))
         self.image.setCurrentIndex(1)
+        self._tilt_records = []
+        self.expected_curve.setData([], [])
         self.drift_scatter.setData([res["tilt"].angle], [res["drift"]])
         self._time_changed(1, None)
         conv = "converged" if res["converged"] else "NOT converged"
@@ -344,9 +394,42 @@ class ResultsPanel(QWidget):
             return edfs[0] if edfs else None
         return None
 
+    def _export_tiff(self):
+        from PySide6.QtWidgets import QFileDialog
+        data = self.stack_combo.currentData()
+        if not data:
+            return
+        src = Path(data[1])
+        dst, _ = QFileDialog.getSaveFileName(self, "Export TIFF", str(src.with_suffix(".tif")), "TIFF (*.tif)")
+        if not dst:
+            return
+        self.btn_tiff.setEnabled(False)
+        self.loading.setRange(0, 0)
+        self.loading.setFormat(f"Exporting {Path(dst).name}…")
+        self.loading.show()
+        bridge = self._bridge
+
+        def work():
+            from ..export import export_tiff
+            try:
+                bridge.exported.emit(export_tiff(src, dst, progress=lambda d, n: bridge.progress.emit(-1, d, n)))
+            except Exception as e:
+                bridge.exported.emit(e)
+
+        threading.Thread(target=work, name="pyprep-tiff-export", daemon=True).start()
+
+    def _on_exported(self, result):
+        self.loading.hide()
+        self._set_buttons()
+        if isinstance(result, Exception):
+            QMessageBox.warning(self, "pyPrep", f"TIFF export failed:\n{result}")
+        elif result is not None:
+            self.title.setText(self.title.text() + f"<br>Exported {Path(result).name}")
+
     def _set_buttons(self):
         data = self.stack_combo.currentData()
         self.btn_3dmod.setEnabled(bool(data) and imod_program("3dmod") is not None)
+        self.btn_tiff.setEnabled(bool(data))
         self.btn_etomo.setEnabled(self._edf() is not None and imod_program("etomo") is not None)
         self.btn_folder.setEnabled(self.out_dir is not None)
 
