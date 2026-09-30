@@ -50,6 +50,7 @@ class ReconSettings:
     remove_xrays: bool = True
     cpus: int = max(1, (os.cpu_count() or 2) - 1)
     use_gpu: bool = False
+    handedness: str = "auto"               # auto (flip if the CTF gradient says so) | keep | flip
     ctf_correct: bool = True               # phase-flip with pyPrep's per-tilt defocus (IMOD ctfphaseflip)
     deconvolve: bool = True                # also write <series>_rec_deconv.mrc (Wiener-like filter)
     deconv_strength: float = 1.0
@@ -278,6 +279,14 @@ def reconstruct(out_dir: Path, series_name: str, stack: Path, pixel_size_A: floa
     if rs.ctf_correct and not use_ctf:
         log("CTF correction skipped: no pyPrep CTF estimate for this series")
     recon_dir = prepare_recon_dir(out_dir, series_name, stack, Path(ctf["defocus_file"]) if use_ctf else None)
+    if use_ctf:
+        # The invert flag follows the handedness relative to the tilt axis used here
+        # (a handedness correction rotates the axis by 180 deg, which reverses the gradient).
+        from .ctf import read_defocus_file, write_defocus_file
+        dfile = recon_dir / f"{series_name}.defocus"
+        _, rows = read_defocus_file(dfile)
+        write_defocus_file(dfile, [r[1] for r in rows], [r[2] / 1000 for r in rows],
+                           invert=ctf.get("handedness", 1) < 0)
     dirs = build_directives(pixel_size_A, tilt_axis, voltage_kv, rs, ctf if use_ctf else None)
     if use_ctf:
         log(f"CTF correction with {series_name}.defocus (defocus {ctf['defocus_um']:.2f} um"
@@ -307,7 +316,7 @@ def reconstruct(out_dir: Path, series_name: str, stack: Path, pixel_size_A: floa
     status = "cancelled" if cancelled else ("complete" if rc == 0 and tomo is not None else "failed")
     rec = {"status": status, "returncode": rc, "preset": rs.preset, "recon_dir": str(recon_dir),
            "tomogram": str(tomo) if tomo else None, "stack": str(stack), "directives": dirs,
-           "ctf_corrected": use_ctf,
+           "ctf_corrected": use_ctf, "tilt_axis": round(float(tilt_axis), 2),
            "settings": rs.to_dict(), "seconds": round(time.perf_counter() - t0, 1)}
     (recon_dir / "pyprep_recon.json").write_text(json.dumps(rec, indent=1))
     log(f"Reconstruction {status}" + (f": {tomo.name}" if tomo else "") + f" ({rec['seconds']:.0f} s)")

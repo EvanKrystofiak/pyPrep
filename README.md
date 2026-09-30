@@ -33,6 +33,8 @@ thumbnail of every tomogram in the session, with its name, to pick the best data
 to take further. pyPrep measures the **defocus of every tilt** on the GPU (tilt-aware, with
 automatic handedness), phase-flips the stack in IMOD with it, and writes a
 **deconvolved tomogram** with stronger contrast for viewing and segmentation.
+The defocus gradient also shows whether tomograms would come out mirrored;
+pyPrep then corrects the **handedness** automatically.
 When IMOD's automatic positioning fails, **Position tomogram**
 lets you mark the top and bottom of the specimen. pyPrep then rebuilds the
 tomogram flat, centred and at the right thickness.

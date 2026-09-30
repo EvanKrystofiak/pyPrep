@@ -395,6 +395,14 @@ class SettingsForms(QObject):
         self.pos_thickness = _dspin(20, 5000, 10, 0, " nm", "Thickness of the trial tomogram used for positioning.")
         self.thickness = _dspin(20, 5000, 10, 0, " nm")
         self.thickness_label = QLabel("Fallback thickness")
+        self.handedness = QComboBox()
+        self.handedness.setMinimumWidth(320)
+        self.handedness.addItem("Automatic (from the CTF defocus gradient)", "auto")
+        self.handedness.addItem("Keep as recorded", "keep")
+        self.handedness.addItem("Always flip", "flip")
+        self.handedness.setToolTip("Automatic: if the defocus gradient measured by CTF estimation shows the data\n"
+                                   "would reconstruct as a mirror image, the tilt axis is rotated by 180 deg.\n"
+                                   "The stacks' .mdoc files get the corrected tilt axis as well.")
         self.sirt = _ispin(0, 100, "SIRT-like radial filter equivalent to this many SIRT iterations\n"
                                    "(better low-resolution contrast). 0 = plain weighted back-projection.")
         self.remove_xrays = QCheckBox("Remove X-rays / hot pixels (ccderaser)")
@@ -406,6 +414,7 @@ class SettingsForms(QObject):
         self.pos_thickness_label = QLabel("Positioning thickness")
         f.addRow(self.pos_thickness_label, self.pos_thickness)
         f.addRow(self.thickness_label, self.thickness)
+        f.addRow("Handedness", self.handedness)
         f.addRow("SIRT-like filter", self.sirt)
         f.addRow("CPU cores", self.cpus)
         f.addRow("", self.remove_xrays)
@@ -502,7 +511,8 @@ class SettingsForms(QObject):
                           positioning_thickness_nm=self.pos_thickness.value(),
                           thickness_nm=self.thickness.value(), sirt_like_iterations=self.sirt.value(),
                           remove_xrays=self.remove_xrays.isChecked(), cpus=self.cpus.value(),
-                          use_gpu=self.imod_gpu.isChecked(), ctf_correct=self.ctf_correct.isChecked(),
+                          use_gpu=self.imod_gpu.isChecked(), handedness=self.handedness.currentData(),
+                          ctf_correct=self.ctf_correct.isChecked(),
                           deconvolve=self.deconvolve.isChecked(), deconv_strength=self.deconv_strength.value(),
                           deconv_falloff=self.deconv_falloff.value(), extra_directives=self.extra.toPlainText())
         c = CtfSettings(enabled=self.ctf_enabled.isChecked(), cs_mm=self.ctf_cs.value(),
@@ -575,6 +585,7 @@ class SettingsForms(QObject):
         self.cpus.setValue(min(r.cpus, self.cpus.maximum()))
         self.imod_gpu.setChecked(r.use_gpu)
         self.extra.setPlainText(r.extra_directives)
+        self.handedness.setCurrentIndex(max(0, self.handedness.findData(r.handedness)))
         self.ctf_correct.setChecked(r.ctf_correct)
         self.deconvolve.setChecked(r.deconvolve)
         self.deconv_strength.setValue(r.deconv_strength)

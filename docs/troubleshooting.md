@@ -123,6 +123,10 @@ larger fractions.
 - **"direction of the defocus gradient is uncertain"**: the series has few
   tilts beyond 20° or weak rings. pyPrep then uses the majority vote, and CTF
   correction at bin 4 is barely affected by it.
+- **New tomograms look rotated by 180° compared with older ones**: the
+  handedness was corrected (Reconstruction page, *Handedness*). The new ones
+  have the correct handedness. Choose *Keep as recorded* to get the old
+  orientation back.
 - **Phase-plate data**: phase shifts are not fitted yet. Turn CTF correction
   off for such data.
 

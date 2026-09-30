@@ -114,7 +114,9 @@ IMOD ctfplotter, but no code.
 
   *s* = +1 is IMOD's convention: in the aligned stack, with the tilt axis
   vertical, the right side is more underfocused at positive tilt angles.
-  Otherwise ctfphaseflip needs `InvertTiltAngles`, which pyPrep sets.
+  Otherwise the tomogram would be a mirror image. By default pyPrep then
+  corrects the handedness (see below). With *Keep as recorded* it instead
+  sets ctfphaseflip's `InvertTiltAngles`.
 - **Fit resolution.** The tiles' profiles are rescaled in *k* to the central
   defocus and averaged. The fit resolution is where the local correlation with
   the model (±1 ring) drops below 0.3.
@@ -139,6 +141,30 @@ IMOD ctfplotter, but no code.
    (`<series>.tlt`), because ctfphaseflip matches defocus entries to views
    by angle;
 4. continues from step 10.
+
+**Handedness correction.** IMOD's documentation says that when
+ctfphaseflip needs `InvertTiltAngles`, the reconstruction has inverted
+handedness. So a gradient opposite to IMOD's convention means the tomogram is
+a mirror image.
+
+With *Handedness: Automatic*, pyPrep then passes the tilt axis rotated by 180°
+to batchruntomo. Rotating the axis reverses the sense of rotation relative to
+the specimen, which makes both the reconstruction's handedness and the defocus
+gradient right, so `InvertTiltAngles` is no longer needed. The decision (with
+its reason) is stored under `handedness` in `_pyprep.json`, and written into
+the stacks' mdoc titles.
+
+On the K3 test series (Tomo5, recorded axis 86.2°, corrected −93.8°):
+
+- A CTF fit against the corrected axis follows IMOD's convention in 26 of 26
+  high tilts.
+- The corrected tomogram matched the uncorrected one only after rotating it
+  180° in XY (correlation 0.95).
+- Slabs matched the uncorrected slab from the *opposite* side of the centre
+  (0.95) rather than the same side (0.72).
+
+Together these show the corrected tomogram is the point mirror of the
+uncorrected one.
 
 ## Deconvolution
 

@@ -344,6 +344,75 @@ def deconvolve_series(series: TiltSeries, settings: ProcessingSettings, out_root
     return rec
 
 
+def normalize_angle(a: float) -> float:
+    """Angle in degrees wrapped to [-180, 180)."""
+    return (float(a) + 180.0) % 360.0 - 180.0
+
+
+def handedness_decision(mode: str, ctf_rec: dict | None) -> tuple[bool, str]:
+    """(rotate the tilt axis by 180 deg?, reason) for the handedness setting and CTF record.
+
+    A defocus gradient opposite to IMOD's convention means the reconstruction
+    would be a mirror image (IMOD ctfplotter/ctfphaseflip documentation);
+    rotating the tilt axis by 180 deg makes both the gradient and the
+    handedness right."""
+    if mode == "flip":
+        return True, "tilt axis rotated by 180 deg (setting: always flip)"
+    if mode == "keep":
+        return False, "tilt axis as recorded (setting: keep)"
+    if not ctf_rec:
+        return False, "tilt axis as recorded (no CTF estimate to check the handedness)"
+    h = ctf_rec.get("handedness", 1)
+    conf = ctf_rec.get("handedness_confidence", 0.0)
+    votes = ctf_rec.get("handedness_votes")            # absent in records from before it was stored
+    of = f"{100 * conf:.0f}% of " + (f"{votes} tilts beyond 20 deg" if votes is not None else "the tilts beyond 20 deg")
+    if h > 0:
+        return False, "tilt axis as recorded (CTF defocus gradient matches IMOD's convention)"
+    if conf >= 0.8 and (votes is None or votes >= 4):
+        return True, f"tilt axis rotated by 180 deg to correct the handedness (CTF defocus gradient inverted in {of})"
+    return False, f"tilt axis as recorded: the CTF suggests inverted handedness, but not clearly enough ({of})"
+
+
+_RE_AXIS_TITLE = re.compile(r"(Tilt axis angle = )(-?\d+(?:\.\d*)?)")
+
+
+def set_stack_mdoc_axis(mdoc_path: Path, axis: float) -> bool:
+    """Rewrite the 'Tilt axis angle = ...' title of a stack's .mrc.mdoc (what etomo reads)."""
+    try:
+        text = Path(mdoc_path).read_text()
+    except OSError:
+        return False
+    new = _RE_AXIS_TITLE.sub(lambda m: f"{m.group(1)}{axis:.2f}", text, count=1)
+    if new != text:
+        Path(mdoc_path).write_text(new)
+    return True
+
+
+def sync_handedness(series: TiltSeries, settings: ProcessingSettings, out_root, log_callback=None) -> dict | None:
+    """Decide the tilt axis for this series (handedness setting + CTF), record it in
+    ``_pyprep.json`` and write it into the stacks' mdoc files."""
+    out_dir = Path(out_root) / series.name
+    j = result_json_path(series, out_dir)
+    try:
+        info = json.loads(j.read_text())
+    except (OSError, ValueError):
+        return None
+    flip, reason = handedness_decision(settings.recon.handedness, info.get("ctf"))
+    recorded = series.tilt_axis if series.tilt_axis is not None else 0.0
+    axis = normalize_angle(recorded + 180.0) if flip else recorded
+    h = {"flipped": flip, "tilt_axis": round(axis, 2), "recorded_tilt_axis": round(recorded, 2), "reason": reason}
+    if info.get("handedness") != h:
+        for o in info.get("outputs", []):
+            p = Path(o["path"])
+            p = p if p.exists() else out_dir / p.name
+            set_stack_mdoc_axis(p.with_name(p.name + ".mdoc"), axis)
+        info["handedness"] = h
+        j.write_text(json.dumps(info, indent=1))
+        if log_callback:
+            log_callback(f"{series.name}: {reason}" + (f" -> {axis:.2f} deg" if flip else ""))
+    return h
+
+
 def write_rawtlt(path: Path, angles) -> None:
     path.write_text("".join(f"{a:8.2f}\n" for a in angles))
 
@@ -569,6 +638,13 @@ def recon_complete(series: TiltSeries, settings: ProcessingSettings, out_root) -
         return False
     if "used_tilts" in rec and sorted(rec["used_tilts"]) != used_tilt_ids(series, settings):
         return False
+    try:
+        want = (json.loads(result_json_path(series, Path(out_root) / series.name).read_text())
+                .get("handedness") or {}).get("flipped", False)
+    except (OSError, ValueError):
+        want = False
+    if bool(rec.get("handedness_flipped", False)) != bool(want):
+        return False                      # handedness decision changed: reconstruct again
     return (rec.get("status") == "complete" and rec.get("preset") == settings.recon.preset
             and rec.get("tomogram") and Path(rec["tomogram"]).exists())
 
@@ -600,13 +676,20 @@ def reconstruct_series(series: TiltSeries, settings: ProcessingSettings, out_roo
         log.info(f"===== Reconstruction: {imod.PRESETS.get(settings.recon.preset, settings.recon.preset)}, "
                  f"bin {b} =====")
         progress(0, total_steps, "IMOD setup")
-        axis = series.tilt_axis if series.tilt_axis is not None else 0.0
+        hand = sync_handedness(series, settings, out_root) or {}
+        flipped = bool(hand.get("flipped"))
+        axis = hand.get("tilt_axis", series.tilt_axis if series.tilt_axis is not None else 0.0)
         try:
             ctf_rec = json.loads(result_json_path(series, out_dir).read_text()).get("ctf")
         except (OSError, ValueError):
             ctf_rec = None
+        if ctf_rec and flipped:
+            ctf_rec = dict(ctf_rec, handedness=-ctf_rec.get("handedness", 1))   # relative to the rotated axis
+        if hand.get("reason"):
+            log.info("Handedness: " + hand["reason"] + f" (tilt axis {axis:.2f} deg)")
         rec = imod.reconstruct(out_dir, series.name, stack, series.pixel_size * b, axis,
                                series.voltage, settings.recon, log=on_line, cancel=cancel, ctf=ctf_rec)
+        rec["handedness_flipped"] = flipped
     except Exception as e:
         log.exception(f"Reconstruction FAILED: {e}")
         rec = {"status": "failed", "error": f"{type(e).__name__}: {e}", "preset": settings.recon.preset}
@@ -671,6 +754,8 @@ def run_series(series: TiltSeries, settings: ProcessingSettings, out_root,
         result["stacks"] = "skipped"
         if settings.ctf.enabled:
             ensure_ctf(series, settings, out_root, log_callback, cancel)
+    if result["stacks"] in ("complete", "skipped"):
+        sync_handedness(series, settings, out_root, log_callback)
     else:
         rec = process_series(series, settings, out_root, progress, cancel, log_callback)
         result["stacks"] = rec["status"]

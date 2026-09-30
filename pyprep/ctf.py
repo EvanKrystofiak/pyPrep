@@ -156,6 +156,7 @@ class SeriesCtf:
     handedness: int                     # +1 = IMOD convention, -1 = needs InvertTiltAngles
     handedness_confidence: float        # fraction of high tilts preferring the chosen sign
     tilt_offset: float                  # deg; specimen tilt = stage tilt + offset (from the gradient)
+    handedness_votes: int                # tilts beyond 20 deg that decided the handedness
     k: np.ndarray                       # fit-range frequencies (1/A) for the plots below
     data: np.ndarray                    # (tilts, K) tile-averaged, flattened spectrum
     model: np.ndarray                   # (tilts, K) fitted model on the same scale
@@ -329,7 +330,7 @@ def fit_series(collector: SpectrumCollector, axis_deg: float, kv: float, device=
         tilts.append(TiltCtf(spec.angle, d / 1e4, sc, f.resolution(avg, d)))
         data.append(avg)
         model.append(m * scale)
-    return SeriesCtf(tilts, sign, conf, offset, f.k, np.array(data), np.array(model),
+    return SeriesCtf(tilts, sign, conf, offset, len(high), f.k, np.array(data), np.array(model),
                      settings={"cs_mm": s.cs_mm, "amplitude_contrast": s.amplitude_contrast, "kv": kv,
                                "fit_range_A": [s.min_res_A, float(1 / f.k[-1])], "tile": s.tile,
                                "pixel_A": collector.work_pixel})
@@ -381,7 +382,7 @@ def save_result(res: SeriesCtf, out_dir: Path, name: str) -> dict:
                         angles=np.array(angles), defocus_um=res.defocus_um)
     return {"defocus_file": str(out_dir / f"{name}.defocus"),
             "handedness": res.handedness, "handedness_confidence": round(res.handedness_confidence, 3),
-            "tilt_offset_deg": round(res.tilt_offset, 2),
+            "handedness_votes": res.handedness_votes, "tilt_offset_deg": round(res.tilt_offset, 2),
             "defocus_um": round(res.summary_defocus(), 3), "settings": res.settings,
             "tilts": [{"angle": t.angle, "defocus_um": round(t.defocus_um, 4), "score": round(t.score, 4),
                        "resolution_A": round(t.resolution_A, 1)} for t in res.tilts]}

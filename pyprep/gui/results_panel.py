@@ -268,6 +268,8 @@ class ResultsPanel(QWidget):
                          + (f" ({recon.get('preset')}, {recon.get('seconds', 0):.0f} s)" if recon.get("seconds") else ""))
         if self._ctf:
             parts.append(f"defocus {self._ctf.get('defocus_um', 0):.2f} µm")
+        if (rec.get("handedness") or {}).get("flipped"):
+            parts.append(f"handedness corrected (tilt axis {rec['handedness']['tilt_axis']:.1f}°)")
         if rec.get("error"):
             parts.append(f"<span style='color:{theme.DANGER}'>{rec['error']}</span>")
         self.title.setText(" &nbsp;·&nbsp; ".join(parts))

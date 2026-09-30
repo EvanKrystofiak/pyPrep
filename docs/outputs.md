@@ -98,6 +98,12 @@ and the *skip completed steps* option read it.
   - the series defocus (`defocus_um`, used for deconvolution);
   - the handedness and its confidence;
   - the specimen tilt offset (`tilt_offset_deg`).
+- The `handedness` entry in `_pyprep.json`:
+  - whether the tilt axis was rotated by 180° (`flipped`);
+  - the tilt axis used (`tilt_axis`) and the one recorded in the mdoc;
+  - the reason.
+
+  The stacks' `.mrc.mdoc` titles carry the axis used.
 
 ## Reconstruction folder (`imod_bin<N>`)
 

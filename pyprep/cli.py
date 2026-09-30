@@ -110,6 +110,8 @@ def cmd_run(args) -> int:
     _apply_ctf_args(settings, args)
     if args.no_ctf_correct:
         r.ctf_correct = False
+    if args.handedness:
+        r.handedness = args.handedness
     if args.no_deconv:
         r.deconvolve = False
     if args.deconv_strength is not None:
@@ -282,6 +284,9 @@ def main(argv=None) -> int:
     p.add_argument("--no-ctf", action="store_true", help="skip per-tilt CTF estimation")
     add_ctf_args(p)
     p.add_argument("--no-ctf-correct", action="store_true", help="do not phase-flip (IMOD ctfphaseflip)")
+    p.add_argument("--handedness", choices=["auto", "keep", "flip"],
+                   help="auto (default): rotate the tilt axis by 180 deg when the CTF shows inverted "
+                        "handedness; keep: as recorded; flip: always rotate")
     p.add_argument("--no-deconv", action="store_true", help="do not write a deconvolved tomogram")
     p.add_argument("--deconv-strength", type=float, help="deconvolution strength (default 1.0)")
     p.add_argument("--deconv-falloff", type=float, help="deconvolution SNR falloff (default 1.0)")

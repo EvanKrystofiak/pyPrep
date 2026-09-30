@@ -195,9 +195,28 @@ at the top shows whether IMOD was found.
 | Positioning | Automatic | IMOD cryo-positioning finds the specimen slab and sets thickness and pitch. Sparse specimens (isolated particles, thin films) can defeat it; the *Fallback thickness* is then used and a warning is logged. *Fixed thickness* skips positioning. |
 | Positioning thickness | 330 nm | Thickness of the trial tomogram used for positioning. |
 | Fallback / fixed thickness | 200 nm | |
+| Handedness | Automatic | See below. *Keep as recorded* uses the tilt axis from the mdoc; *Always flip* rotates it by 180°. |
 | SIRT-like filter | 6 | Radial filter equivalent to this many SIRT iterations (better low-resolution contrast); 0 = plain weighted back-projection. |
 | CPU cores, GPU | all but one core, off | GPU back-projection needs a CUDA-enabled IMOD. |
 | Remove X-rays | on | ccderaser on the stack. |
+
+**Handedness.** If the tilt-angle sign, the tilt-axis angle or the image
+orientation are not what IMOD assumes, the tomogram comes out as a mirror
+image. This does not matter for segmentation or measuring shapes. It does
+matter for subtomogram averaging, for helices, and for anything chiral.
+
+CTF estimation detects this from the direction of the defocus gradient. With
+*Automatic*, pyPrep then reconstructs with the tilt axis rotated by 180°,
+which gives the correct handedness. It does this when at least 80% of the
+tilts beyond 20° agree. The stacks' `.mrc.mdoc` files get the corrected tilt
+axis too, so an etomo project you set up by hand agrees. The Results page
+shows *handedness corrected* when this applies.
+
+A corrected tomogram is the point mirror of an uncorrected one: rotated 180°
+in XY and flipped in Z. Tomograms made before the correction (or by etomo
+from the original mdoc) therefore look rotated by 180° compared with new
+ones. When the decision changes, a series' tomogram is out of date and is
+reconstructed again on the next run.
 
 **CTF correction and deconvolution**
 
