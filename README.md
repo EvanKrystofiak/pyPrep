@@ -115,8 +115,7 @@ To cite pyPrep, use **Cite this repository** on the GitHub page (from
 
 ## Acknowledgements
 
-pyPrep builds on ideas from MotionCor2/3 (frame alignment) and TOMOMAN
-(tilt-series organisation), but uses no code from either. It relies on:
+pyPrep builds on ideas from MotionCor2/3 (frame alignment).
 
 - [IMOD](https://bio3d.colorado.edu/imod/) for tilt-series alignment and
   reconstruction;
