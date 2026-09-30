@@ -29,10 +29,22 @@ class Tilt:
     def missing(self) -> bool:
         return self.frame_path is None
 
-    def doses_for(self, n_frames: int) -> np.ndarray:
-        """Per-frame doses for a movie with ``n_frames`` frames."""
-        if len(self.frame_doses) == n_frames:
-            return np.asarray(self.frame_doses, dtype=np.float64)
+    def doses_for(self, n_frames: int, frame_counts: list[int] | None = None) -> np.ndarray:
+        """Dose (e/A^2) of each of ``n_frames`` frames.
+
+        ``frame_counts`` gives the raw detector frames summed into each frame
+        (EER fractions): per-frame doses from the mdoc are then summed per
+        fraction, or the tilt dose is split in proportion to the frame counts.
+        """
+        fd = np.asarray(self.frame_doses, dtype=np.float64)
+        if len(fd) == n_frames:
+            return fd
+        if frame_counts is not None and len(frame_counts) == n_frames:
+            counts = np.asarray(frame_counts, dtype=np.int64)
+            if len(fd) == counts.sum():
+                edges = np.concatenate([[0], np.cumsum(counts)])
+                return np.array([fd[a:b].sum() for a, b in zip(edges[:-1], edges[1:])])
+            return self.exposure_dose * counts / max(counts.sum(), 1)
         return np.full(n_frames, self.exposure_dose / max(n_frames, 1))
 
 

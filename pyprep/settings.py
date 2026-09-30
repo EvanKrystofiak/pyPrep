@@ -11,6 +11,18 @@ from .motion import MotionSettings
 
 
 @dataclass
+class InputSettings:
+    """How movies are read: EER fractionation/rendering and the gain reference."""
+    eer_fractions: int = 10         # group each tilt's EER frames into this many fractions
+    eer_group: int = 0              # > 0: fixed EER frames per fraction instead of eer_fractions
+    eer_upsampling: int = 1         # 1 = physical pixels (4K), 2 = 8K super-resolution rendering
+    gain_path: str = ""             # gain reference: EPU .gain (TIFF), MRC or TIFF; "" = none
+    gain_mode: str = "auto"         # auto (divide for .gain/EER, multiply otherwise) | multiply | divide
+    gain_rotate: int = 0            # rotate the gain reference counter-clockwise by 0/90/180/270 deg
+    gain_flip: str = "none"         # then flip it: none | x (left-right) | y (up-down)
+
+
+@dataclass
 class OutputSettings:
     bin_levels: list = field(default_factory=lambda: [1, 4])
     aligned: bool = True            # motion-corrected sum of all frames
@@ -32,6 +44,7 @@ class OutputSettings:
 
 @dataclass
 class ProcessingSettings:
+    input: InputSettings = field(default_factory=InputSettings)
     motion: MotionSettings = field(default_factory=MotionSettings)
     output: OutputSettings = field(default_factory=OutputSettings)
     recon: ReconSettings = field(default_factory=ReconSettings)
@@ -49,8 +62,9 @@ class ProcessingSettings:
         def build(klass, data):
             names = {f.name for f in fields(klass)}
             return klass(**{k: v for k, v in (data or {}).items() if k in names})
-        top = {k: v for k, v in d.items() if k not in ("motion", "output", "recon")}
+        top = {k: v for k, v in d.items() if k not in ("input", "motion", "output", "recon")}
         s = build(cls, top)
+        s.input = build(InputSettings, d.get("input"))
         s.motion = build(MotionSettings, d.get("motion"))
         s.output = build(OutputSettings, d.get("output"))
         s.recon = build(ReconSettings, d.get("recon"))

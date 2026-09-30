@@ -28,8 +28,14 @@ def cmd_scan(args) -> int:
     if not series:
         print("No tilt-series mdoc files found.")
         return 1
+    from .io.frames import open_movie
     for s in series:
         print(s.summary())
+        if s.usable:
+            try:
+                print("    movies: " + open_movie(s.usable[0].frame_path).describe())
+            except Exception as e:
+                print(f"    movies: could not open {s.usable[0].frame_path.name}: {e}")
         for t in s.missing:
             print(f"    missing: tilt {t.zvalue + 1:03d} ({t.angle:+.2f} deg) {t.section.get('SubFramePath', '')}")
     return 0
@@ -63,6 +69,21 @@ def cmd_run(args) -> int:
         settings.use_gpu = False
     if args.force:
         settings.skip_existing = False
+    inp = settings.input
+    if args.eer_fractions:
+        inp.eer_fractions, inp.eer_group = args.eer_fractions, 0
+    if args.eer_group:
+        inp.eer_group = args.eer_group
+    if args.eer_upsampling:
+        inp.eer_upsampling = args.eer_upsampling
+    if args.gain:
+        inp.gain_path = args.gain
+    if args.gain_mode:
+        inp.gain_mode = args.gain_mode
+    if args.gain_rotate is not None:
+        inp.gain_rotate = args.gain_rotate
+    if args.gain_flip:
+        inp.gain_flip = args.gain_flip
     r = settings.recon
     if args.reconstruct:
         r.enabled = True
@@ -129,6 +150,13 @@ def main(argv=None) -> int:
     p.add_argument("--dose-weighted", action="store_true", help="also write a dose-weighted stack")
     p.add_argument("--dtype", choices=["float32", "int16"])
     p.add_argument("--exclude", type=float, nargs="+", metavar="ANGLE", help="tilt angles to leave out")
+    p.add_argument("--eer-fractions", type=int, help="EER: sum each tilt into this many fractions (default 10)")
+    p.add_argument("--eer-group", type=int, help="EER: fixed number of EER frames per fraction instead")
+    p.add_argument("--eer-upsampling", type=int, choices=[1, 2], help="EER: 1 = 4K, 2 = 8K super-resolution")
+    p.add_argument("--gain", help="gain reference (EPU .gain, MRC or TIFF)")
+    p.add_argument("--gain-mode", choices=["auto", "multiply", "divide"])
+    p.add_argument("--gain-rotate", type=int, choices=[0, 90, 180, 270], help="rotate gain CCW (degrees)")
+    p.add_argument("--gain-flip", choices=["none", "x", "y"], help="flip gain after rotation")
     p.add_argument("--align-bin", type=int, help="binning used for measuring shifts (default 4)")
     p.add_argument("--bfactor", type=float, help="B-factor for alignment in A^2 (default 500)")
     p.add_argument("--cpu", action="store_true", help="do not use the GPU")

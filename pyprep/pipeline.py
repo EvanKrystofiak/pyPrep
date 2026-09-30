@@ -10,7 +10,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -21,7 +21,7 @@ from . import __version__, gpu
 from .io import mrc
 from .io.frames import open_movie
 from .io.mdoc import Mdoc, MdocSection, PYPREP_TAG, write_mdoc
-from .motion import FrameLayout, MotionCorrector
+from .motion import FrameLayout, MotionCorrector, MotionSettings
 from .settings import ProcessingSettings
 from .tiltseries import TiltSeries
 
@@ -112,6 +112,49 @@ def _close_logger(log: logging.Logger) -> None:
         log.removeHandler(h)
 
 
+@dataclass
+class MovieContext:
+    """How a series' movies map onto physical pixels.
+
+    EER frames may be rendered at ``up`` x super-resolution; everything the user
+    sets (output binning, alignment binning, shift limits) is in physical pixels,
+    so it is scaled here, and shifts are reported back in physical pixels.
+    """
+    up: int
+    frame_pixel: float                   # A per rendered pixel
+    motion: MotionSettings               # alignment settings in rendered pixels
+    gain: torch.Tensor | None
+    description: list
+
+    def frame_bin(self, out_bin: int) -> int:
+        return int(out_bin) * self.up
+
+
+def prepare_movie_context(series: TiltSeries, settings: ProcessingSettings, movie, device) -> MovieContext:
+    up = int(getattr(movie, "upsampling", 1) or 1)
+    ms = settings.motion
+    motion = replace(ms, align_bin=int(ms.align_bin) * up, max_shift=ms.max_shift * up,
+                     tolerance=ms.tolerance * up)
+    desc = [movie.describe()]
+    gain = None
+    inp = settings.input
+    if inp.gain_path:
+        from .io.gain import prepare_gain
+        g = prepare_gain(inp.gain_path, movie.shape, inp.gain_mode, inp.gain_rotate, inp.gain_flip,
+                         up, bool(getattr(movie, "is_eer", False)))
+        gain = torch.from_numpy(g.multiplier).to(device)
+        desc.append(g.description)
+    elif getattr(movie, "is_eer", False):
+        desc.append("WARNING: EER movie without a gain reference - frames are not gain-corrected")
+    return MovieContext(up, series.pixel_size / up, motion, gain, desc)
+
+
+def read_frames(path, settings: ProcessingSettings) -> tuple[np.ndarray, list | None]:
+    """All frames/fractions of one tilt and the raw frame count behind each (EER)."""
+    movie = open_movie(path, settings.input)
+    return movie.read(), movie.frame_counts()
+
+
 def _to_host(img: torch.Tensor, dtype: np.dtype) -> tuple[np.ndarray, tuple]:
     """Convert on the device to the output dtype, compute header stats there, then copy to host."""
     if dtype.kind == "i":
@@ -196,9 +239,13 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
         kinds = {out.kind for out in outputs}
         bins = sorted({out.bin for out in outputs})
 
-        first = open_movie(tilts[0].frame_path)
+        first = open_movie(tilts[0].frame_path, settings.input)
         ny, nx = first.shape
-        layout = FrameLayout.for_shape(ny, nx, bins + [int(ms.align_bin)])
+        ctx = prepare_movie_context(series, settings, first, device)
+        for line in ctx.description:
+            (log.warning if line.startswith("WARNING") else log.info)(line)
+        frame_bins = {b: ctx.frame_bin(b) for b in bins}
+        layout = FrameLayout.for_shape(ny, nx, list(frame_bins.values()) + [int(ctx.motion.align_bin)])
         dtype = np.dtype(o.dtype)
         sample = first.read(0, 1)
         if dtype.kind == "i" and sample.dtype.kind == "f":
@@ -207,20 +254,20 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
         label = mrc.make_label(f"pyPrep {__version__}: aligned {series.name}")
         for out in outputs:
             writers[(out.kind, out.bin)] = mrc.MrcStackWriter(
-                out.path, nx // out.bin, ny // out.bin, len(tilts), dtype,
+                out.path, nx // frame_bins[out.bin], ny // frame_bins[out.bin], len(tilts), dtype,
                 series.pixel_size * out.bin, [label])
         log.info(f"{len(tilts)} tilts -> " + ", ".join(p.path.name for p in outputs))
         log.info(f"Frames {nx}x{ny}, FFT size {layout.W}x{layout.H}; alignment bin {ms.align_bin}, "
                  f"B-factor {ms.bfactor}, axis masking {'on' if ms.mask_axes else 'off'}")
 
-        mc = MotionCorrector(ms, device)
+        mc = MotionCorrector(ctx.motion, device)
         stats = {k: [] for k in writers}
         motion_rows = []
         # One thread prefetches the next tilt's frames, another writes finished sections,
         # so disk I/O overlaps GPU work.  At most one tilt of writes is kept in flight.
         read_pool = ThreadPoolExecutor(max_workers=1)
         write_pool = ThreadPoolExecutor(max_workers=1)
-        pending = read_pool.submit(lambda p: open_movie(p).read(), tilts[0].frame_path)
+        pending = read_pool.submit(read_frames, tilts[0].frame_path, settings)
         writes: list = []
         try:
             for z, t in enumerate(tilts):
@@ -228,21 +275,23 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
                     raise Cancelled()
                 progress(z, len(tilts), f"Tilt {z + 1}/{len(tilts)} ({t.angle:+.1f} deg)")
                 t0 = time.perf_counter()
-                frames = pending.result()
+                frames, frame_counts = pending.result()
                 if z + 1 < len(tilts):
-                    pending = read_pool.submit(lambda p: open_movie(p).read(), tilts[z + 1].frame_path)
+                    pending = read_pool.submit(read_frames, tilts[z + 1].frame_path, settings)
                 t1 = time.perf_counter()
                 if frames.shape[1:] != (ny, nx):
                     raise RuntimeError(f"{t.frame_path.name}: frame size {frames.shape[1:]} != {(ny, nx)}")
-                res = mc.align(frames, series.pixel_size, layout=layout)
+                res = mc.align(frames, ctx.frame_pixel, gain=ctx.gain, layout=layout)
                 t2 = time.perf_counter()
-                imgs = mc.sum_frames(frames, res.shifts, series.pixel_size, bins=bins,
+                imgs = mc.sum_frames(frames, res.shifts, ctx.frame_pixel, bins=list(frame_bins.values()),
                                      even_odd=bool(kinds & {"even", "odd"}), dose_weight="dw" in kinds,
-                                     frame_doses=t.doses_for(len(frames)), prior_dose=t.prior_dose,
-                                     voltage_kv=series.voltage, layout=layout, to_numpy=False)
+                                     frame_doses=t.doses_for(len(frames), frame_counts),
+                                     prior_dose=t.prior_dose, voltage_kv=series.voltage, gain=ctx.gain,
+                                     layout=layout, to_numpy=False)
                 host = {}
                 for key in writers:
-                    arr, st = _to_host(imgs[key], dtype)
+                    kind, b = key
+                    arr, st = _to_host(imgs[(kind, frame_bins[b])], dtype)
                     host[key] = (arr, st)
                     stats[key].append((st[0], st[1], st[2] / arr.size))
                 del imgs
@@ -251,13 +300,14 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
                     f.result()
                 t4 = time.perf_counter()
                 writes = [write_pool.submit(w.write_section, z, *host[key]) for key, w in writers.items()]
-                drift = res.drift_angstrom(series.pixel_size)
-                for j, (dy, dx) in enumerate(res.shifts):
+                drift = res.drift_angstrom(ctx.frame_pixel)
+                shifts_phys = res.shifts / ctx.up          # report in physical pixels
+                for j, (dy, dx) in enumerate(shifts_phys):
                     motion_rows.append([z, t.zvalue, f"{t.angle:.2f}", j, f"{dx:.3f}", f"{dy:.3f}"])
                 record["tilts"].append({
                     "z": z, "acquisition": t.zvalue, "angle": t.angle, "file": t.frame_path.name,
                     "frames": int(len(frames)), "prior_dose": t.prior_dose, "dose": t.exposure_dose,
-                    "shifts_px": np.round(res.shifts, 3).tolist(), "scores": np.round(res.scores, 4).tolist(),
+                    "shifts_px": np.round(shifts_phys, 3).tolist(), "scores": np.round(res.scores, 4).tolist(),
                     "iterations": res.iterations, "converged": res.converged, "drift_A": round(drift, 2)})
                 flag = "" if res.converged else "  (not converged)"
                 log.info(f"z {z:2d}  {t.angle:+7.2f} deg  {t.frame_path.name}  {len(frames)} frames  "

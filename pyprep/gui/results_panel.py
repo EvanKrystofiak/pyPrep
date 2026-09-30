@@ -331,7 +331,8 @@ class ResultsPanel(QWidget):
             f"<b>Preview</b> of tilt {res['tilt'].zvalue + 1:03d} ({res['tilt'].angle:+.2f} deg), "
             f"bin {res['bin']}: drift {res['drift']:.2f} A, {res['iterations']} iterations ({conv}), "
             f"mean score {np.mean(res['scores']):.3f}, {res['seconds']:.2f} s. &nbsp;Slider: 0 = unaligned, "
-            f"1 = aligned. Nothing was written to disk.")
+            f"1 = aligned. Nothing was written to disk."
+            + (f"<br>{res['movie']}" if res.get("movie") else ""))
         self._set_buttons()
 
     # ------------------------------------------------------------------ IMOD / folders

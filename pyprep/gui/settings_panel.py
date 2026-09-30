@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBo
 from .. import gpu, imod
 from ..imod import ReconSettings
 from ..motion import MotionSettings
-from ..settings import OutputSettings, ProcessingSettings
+from ..settings import InputSettings, OutputSettings, ProcessingSettings
 from . import theme
 from .theme import card, dim_label, section_label, title_label
 
@@ -97,6 +97,7 @@ class SettingsForms(QObject):
             for w in page.findChildren(QComboBox):
                 w.currentIndexChanged.connect(self.changed)
         self.exclude.textChanged.connect(self.changed)
+        self.gain_path.textChanged.connect(self.changed)
 
     # ------------------------------------------------------------------ pages
     def _build_alignment(self) -> QWidget:
@@ -105,6 +106,59 @@ class SettingsForms(QObject):
             "Each tilt's dose fractions are aligned MotionCor-style: frames are Fourier-binned, "
             "cross-correlated against the sum of all other frames, and the shifts refined until "
             "they converge. Shifts are then applied at full resolution as Fourier phase ramps.")
+        c, v, f = _card_with_form(
+            "Input frames", "MRC/TIFF fraction files are used as saved. Falcon EER movies hold hundreds of "
+                            "detector frames per tilt; they are summed into fractions before alignment.")
+        eer_row = QHBoxLayout()
+        self.eer_mode = QComboBox()
+        self.eer_mode.addItem("Number of fractions", "fractions")
+        self.eer_mode.addItem("EER frames per fraction", "group")
+        self.eer_mode.setMinimumWidth(240)
+        self.eer_value = _ispin(1, 5000, "Fractions per tilt, or EER frames per fraction.\n"
+                                         "Each fraction should hold enough dose to align (~0.2-0.5 e/A²).")
+        self._eer_vals = {"fractions": 10, "group": 50}   # remembered value per grouping mode
+        self._eer_prev = "fractions"
+        self.eer_mode.currentIndexChanged.connect(self._eer_mode_changed)
+        eer_row.addWidget(self.eer_mode)
+        eer_row.addWidget(self.eer_value)
+        eer_row.addStretch()
+        f.addRow("EER grouping", eer_row)
+        self.eer_up = QComboBox()
+        self.eer_up.addItem("Physical pixels (4K)", 1)
+        self.eer_up.addItem("2x super-resolution (8K), binned back", 2)
+        self.eer_up.setMinimumWidth(320)
+        self.eer_up.setToolTip("8K rendering uses the EER sub-pixel positions; frames are aligned at 8K and\n"
+                               "Fourier-binned to the physical pixel size, reducing aliasing. ~4x slower.")
+        f.addRow("EER rendering", self.eer_up)
+        gain_row = QHBoxLayout()
+        self.gain_path = QLineEdit()
+        self.gain_path.setPlaceholderText("none - EPU .gain for EER; not needed for Tomo5 K3 fractions")
+        self.gain_path.setMinimumWidth(420)
+        gb = QPushButton("Browse…")
+        gb.clicked.connect(self._browse_gain)
+        gain_row.addWidget(self.gain_path, 1)
+        gain_row.addWidget(gb)
+        f.addRow("Gain reference", gain_row)
+        g_row = QHBoxLayout()
+        self.gain_mode = QComboBox()
+        self.gain_mode.addItem("Auto (divide .gain / EER)", "auto")
+        self.gain_mode.addItem("Multiply", "multiply")
+        self.gain_mode.addItem("Divide", "divide")
+        self.gain_mode.setMinimumWidth(240)
+        self.gain_mode.setToolTip("EPU .gain files are detector gains: frames are divided by them.\n"
+                                  "SerialEM/DigitalMicrograph references are multiplied.")
+        self.gain_rotate = QComboBox()
+        for deg in (0, 90, 180, 270):
+            self.gain_rotate.addItem(f"rotate {deg}°", deg)
+        self.gain_flip = QComboBox()
+        for label, key in (("no flip", "none"), ("flip left-right", "x"), ("flip up-down", "y")):
+            self.gain_flip.addItem(label, key)
+        for w in (self.gain_mode, self.gain_rotate, self.gain_flip):
+            g_row.addWidget(w)
+        g_row.addStretch()
+        f.addRow("Gain handling", g_row)
+        lay.addWidget(c)
+
         c, v, f = _card_with_form("Alignment")
         self.align_bin = _ispin(1, 16, "Frames are Fourier-binned by this factor when measuring shifts.\n"
                                        "4 suits low-dose tomography fractions, whose shared signal is\n"
@@ -326,6 +380,17 @@ class SettingsForms(QObject):
         lay.addStretch(1)
         return page
 
+    def _eer_mode_changed(self):
+        self._eer_vals[self._eer_prev] = self.eer_value.value()
+        self._eer_prev = self.eer_mode.currentData()
+        self.eer_value.setValue(self._eer_vals[self._eer_prev])
+
+    def _browse_gain(self):
+        path, _ = QFileDialog.getOpenFileName(None, "Gain reference", self.gain_path.text() or "",
+                                              "Gain references (*.gain *.mrc *.tif *.tiff);;All files (*)")
+        if path:
+            self.gain_path.setText(path)
+
     def _preset_toggled(self, button, checked):
         if checked:
             keys = list(self.preset_buttons)
@@ -369,14 +434,32 @@ class SettingsForms(QObject):
                           thickness_nm=self.thickness.value(), sirt_like_iterations=self.sirt.value(),
                           remove_xrays=self.remove_xrays.isChecked(), cpus=self.cpus.value(),
                           use_gpu=self.imod_gpu.isChecked(), extra_directives=self.extra.toPlainText())
+        by_group = self.eer_mode.currentData() == "group"
+        i = InputSettings(eer_fractions=self._eer_vals["fractions"] if by_group else self.eer_value.value(),
+                          eer_group=self.eer_value.value() if by_group else 0,
+                          eer_upsampling=int(self.eer_up.currentData()),
+                          gain_path=self.gain_path.text().strip().strip('"'),
+                          gain_mode=self.gain_mode.currentData(), gain_rotate=int(self.gain_rotate.currentData()),
+                          gain_flip=self.gain_flip.currentData())
         kind, idx = self.device.currentData()
         dose = self.default_dose.value()
-        return ProcessingSettings(motion=m, output=o, recon=r, use_gpu=(kind == "gpu"), gpu_id=idx,
+        return ProcessingSettings(input=i, motion=m, output=o, recon=r, use_gpu=(kind == "gpu"), gpu_id=idx,
                                   skip_existing=self.skip_existing.isChecked(),
                                   default_dose=dose if dose > 0 else None)
 
     def set_settings(self, s: ProcessingSettings) -> None:
-        m, o, r = s.motion, s.output, s.recon
+        m, o, r, i = s.motion, s.output, s.recon, s.input
+        self._eer_vals = {"fractions": int(i.eer_fractions), "group": int(i.eer_group) or 50}
+        self._eer_prev = "group" if i.eer_group else "fractions"
+        self.eer_mode.blockSignals(True)
+        self.eer_mode.setCurrentIndex(1 if i.eer_group else 0)
+        self.eer_mode.blockSignals(False)
+        self.eer_value.setValue(self._eer_vals[self._eer_prev])
+        self.eer_up.setCurrentIndex(max(0, self.eer_up.findData(int(i.eer_upsampling))))
+        self.gain_path.setText(i.gain_path or "")
+        self.gain_mode.setCurrentIndex(max(0, self.gain_mode.findData(i.gain_mode)))
+        self.gain_rotate.setCurrentIndex(max(0, self.gain_rotate.findData(int(i.gain_rotate))))
+        self.gain_flip.setCurrentIndex(max(0, self.gain_flip.findData(i.gain_flip)))
         self.align_bin.setValue(int(m.align_bin))
         self.bfactor.setValue(m.bfactor)
         self.max_shift.setValue(m.max_shift)

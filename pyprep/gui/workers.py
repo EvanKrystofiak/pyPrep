@@ -66,19 +66,25 @@ class PreviewWorker(QObject):
             from .. import gpu
             from ..io.frames import open_movie
             from ..motion import FrameLayout, MotionCorrector
+            from ..pipeline import prepare_movie_context
             dev = gpu.select_device(self.settings.use_gpu, self.settings.gpu_id)
-            frames = open_movie(self.tilt.frame_path).read()
+            movie = open_movie(self.tilt.frame_path, self.settings.input)
+            ctx = prepare_movie_context(self.series, self.settings, movie, dev)
+            frames = movie.read()
             n, ny, nx = frames.shape
             b = self.display_bin
-            lay = FrameLayout.for_shape(ny, nx, [b, self.settings.motion.align_bin])
-            mc = MotionCorrector(self.settings.motion, dev)
-            res = mc.align(frames, self.series.pixel_size, layout=lay)
-            aligned = mc.sum_frames(frames, res.shifts, self.series.pixel_size, bins=(b,), layout=lay)
-            raw = mc.sum_frames(frames, np.zeros_like(res.shifts), self.series.pixel_size, bins=(b,), layout=lay)
-            self.result.emit({"tilt": self.tilt, "shifts": res.shifts, "scores": res.scores,
+            fb = ctx.frame_bin(b)
+            lay = FrameLayout.for_shape(ny, nx, [fb, ctx.motion.align_bin])
+            mc = MotionCorrector(ctx.motion, dev)
+            res = mc.align(frames, ctx.frame_pixel, gain=ctx.gain, layout=lay)
+            aligned = mc.sum_frames(frames, res.shifts, ctx.frame_pixel, bins=(fb,), gain=ctx.gain, layout=lay)
+            raw = mc.sum_frames(frames, np.zeros_like(res.shifts), ctx.frame_pixel, bins=(fb,),
+                                gain=ctx.gain, layout=lay)
+            self.result.emit({"tilt": self.tilt, "shifts": res.shifts / ctx.up, "scores": res.scores,
                               "iterations": res.iterations, "converged": res.converged,
-                              "seconds": res.seconds, "drift": res.drift_angstrom(self.series.pixel_size),
-                              "aligned": aligned[("sum", b)], "unaligned": raw[("sum", b)], "bin": b})
+                              "seconds": res.seconds, "drift": res.drift_angstrom(ctx.frame_pixel),
+                              "aligned": aligned[("sum", fb)], "unaligned": raw[("sum", fb)], "bin": b,
+                              "movie": " · ".join(ctx.description)})
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
         self.finished.emit()

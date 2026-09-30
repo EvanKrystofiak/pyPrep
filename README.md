@@ -30,6 +30,20 @@ Double-click `pyPrep.bat`. It uses the project's own Python environment in `env\
 | `<series>_motion.csv`, `_pyprep.json`, `_pyprep.log` | per-frame shifts, settings, log |
 | `imod_bin4/` | batchruntomo etomo project; tomogram `<series>_rec.mrc` |
 
+## Movie formats
+
+- **Tomo5 / K3 MRC fractions** (8-bit, already gain-normalized): used as saved.
+- **MRC / TIFF** frame stacks from other software.
+- **Falcon EER** (TIFF compression 65000/65001/65002). Each tilt's EER frames
+  are summed into fractions before alignment: 10 per tilt by default, or a fixed
+  number of EER frames per fraction. They are rendered at physical pixels (4K),
+  or at 2x super-resolution (8K) and Fourier-binned back to the physical pixel
+  size. Supply the EPU `.gain` reference on the Frame alignment page. `.gain`
+  files are divided out automatically; the rotate and flip options fix a
+  mismatched orientation. Decoding uses `imagecodecs`, the same decoder
+  `tifffile` uses. It has been validated against synthetic EER files but not
+  yet against real Falcon data.
+
 ## Reconstruction presets
 
 - **Patch tracking (default):** no fiducials. Uses 400 nm patches with 0.6

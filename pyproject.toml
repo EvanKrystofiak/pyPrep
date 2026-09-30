@@ -12,6 +12,7 @@ dependencies = [
     "scipy",
     "torch",
     "tifffile",
+    "imagecodecs",
     "PySide6",
     "pyqtgraph",
 ]

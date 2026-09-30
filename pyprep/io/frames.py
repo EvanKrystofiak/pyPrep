@@ -19,11 +19,20 @@ MOVIE_EXTENSIONS = (".mrc", ".mrcs", ".tif", ".tiff", ".eer")
 class MovieReader:
     path: Path
     n_frames: int
-    shape: tuple  # (ny, nx)
+    shape: tuple  # (ny, nx) as rendered
     pixel_size: float | None = None
+    upsampling: int = 1             # rendered pixels per physical pixel (EER super-resolution)
+    is_eer: bool = False
 
     def read(self, start: int = 0, count: int | None = None) -> np.ndarray:
         raise NotImplementedError
+
+    def frame_counts(self) -> list[int] | None:
+        """Raw detector frames summed into each returned frame (EER fractions), or None."""
+        return None
+
+    def describe(self) -> str:
+        return f"{self.path.suffix[1:].upper()} {self.n_frames} frames {self.shape[1]}x{self.shape[0]}"
 
 
 class MrcMovie(MovieReader):
@@ -56,12 +65,18 @@ class TiffMovie(MovieReader):
         return data.reshape(count, *self.shape)
 
 
-def open_movie(path: str | os.PathLike, signed_bytes: bool | None = None) -> MovieReader:
+def open_movie(path: str | os.PathLike, options=None, signed_bytes: bool | None = None) -> MovieReader:
+    """Open a movie; ``options`` is an InputSettings (EER fractionation/rendering)."""
     ext = Path(path).suffix.lower()
     if ext in (".mrc", ".mrcs"):
         return MrcMovie(path, signed_bytes)
     if ext in (".tif", ".tiff"):
         return TiffMovie(path)
     if ext == ".eer":
-        raise NotImplementedError("EER support is planned but not implemented yet")
+        from .eer import EerMovie
+        group = int(getattr(options, "eer_group", 0) or 0)
+        movie = EerMovie(path, fractions=None if group else int(getattr(options, "eer_fractions", 10)),
+                         group=group or None, upsampling=int(getattr(options, "eer_upsampling", 1)))
+        movie.is_eer = True
+        return movie
     raise ValueError(f"Unrecognised movie format: {path}")
