@@ -23,7 +23,7 @@ test = ["pytest"]
 pyprep = "pyprep.cli:main"
 
 [project.gui-scripts]
-pyprep-gui = "pyprep.gui.app:main"
+pyprep-gui = "pyprep.gui.launcher:main"
 
 [tool.setuptools.packages.find]
 include = ["pyprep*"]
