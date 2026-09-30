@@ -73,8 +73,10 @@ def is_complete(series: TiltSeries, settings: ProcessingSettings, out_root: Path
 
 
 def _apply_exclusions(series: TiltSeries, angles) -> None:
+    """Exclude tilts near the given angles (adds to any per-tilt exclusions already set)."""
     for t in series.tilts:
-        t.excluded = any(abs(t.angle - a) <= EXCLUDE_TOLERANCE for a in angles)
+        if any(abs(t.angle - a) <= EXCLUDE_TOLERANCE for a in angles):
+            t.excluded = True
 
 
 def _series_logger(log_path: Path, callback: Callable[[str], None] | None) -> logging.Logger:

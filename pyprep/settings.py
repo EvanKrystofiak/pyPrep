@@ -11,7 +11,7 @@ from .motion import MotionSettings
 
 @dataclass
 class OutputSettings:
-    bin_levels: list = field(default_factory=lambda: [1])   # e.g. [1, 4]
+    bin_levels: list = field(default_factory=lambda: [1, 4])
     aligned: bool = True            # motion-corrected sum of all frames
     even_odd: bool = False          # half-sums of alternate frames (denoising training)
     dose_weighted: bool = False     # exposure-filtered sum (skip etomo's dose weighting then)
