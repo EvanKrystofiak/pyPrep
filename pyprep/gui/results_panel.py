@@ -1,4 +1,4 @@
-"""Results tab: browse output stacks, motion plots, open in IMOD."""
+"""Results page: browse stacks and tomograms, motion plots, open in IMOD."""
 
 from __future__ import annotations
 
@@ -11,13 +11,15 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-                               QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSplitter,
+                               QVBoxLayout, QWidget)
 
 from ..io import mrc
+from . import theme
+from .theme import card, dim_label, title_label
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
-DISPLAY_MAX = 1600   # longest display edge; bigger stacks are subsampled for viewing
+DISPLAY_MAX = 1100   # longest display edge; bigger data are block-averaged for viewing
 
 
 def imod_program(name: str) -> str | None:
@@ -32,7 +34,7 @@ def imod_program(name: str) -> str | None:
 
 
 def load_display_stack(path: Path) -> np.ndarray:
-    """Whole stack, subsampled so the longest edge is <= DISPLAY_MAX (display only)."""
+    """Whole stack/volume, block-averaged so the longest edge is <= DISPLAY_MAX (display only)."""
     h = mrc.read_header(path)
     step = max(1, int(np.ceil(max(h.nx, h.ny) / DISPLAY_MAX)))
     out = []
@@ -46,8 +48,7 @@ def load_display_stack(path: Path) -> np.ndarray:
 
 
 def robust_levels(img: np.ndarray) -> tuple[float, float]:
-    sample = img[..., ::4, ::4] if img.ndim >= 2 else img
-    lo, hi = np.percentile(sample, (0.5, 99.5))
+    lo, hi = np.percentile(img[..., ::4, ::4], (0.5, 99.5))
     return float(lo), float(hi if hi > lo else lo + 1)
 
 
@@ -58,135 +59,178 @@ class ResultsPanel(QWidget):
         self.record: dict | None = None
         self._angles: list = []
         self._shifts: list = []
+        self._showing_tilts = True
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 18, 22, 18)
+        lay.setSpacing(10)
+        lay.addWidget(title_label("Results"))
+        self.title = dim_label("Select a processed tilt series on the Tilt series page, or use "
+                               "'Test on one tilt'.")
+        self.title.setTextFormat(Qt.RichText)
+        lay.addWidget(self.title)
+
         top = QHBoxLayout()
         self.stack_combo = QComboBox()
-        self.stack_combo.setMinimumWidth(260)
-        self.stack_combo.currentIndexChanged.connect(self._show_selected_stack)
-        top.addWidget(QLabel("Stack:"))
+        self.stack_combo.setMinimumWidth(320)
+        self.stack_combo.currentIndexChanged.connect(self._show_selected)
+        top.addWidget(QLabel("Show:"))
         top.addWidget(self.stack_combo, 1)
         self.btn_3dmod = QPushButton("Open in 3dmod")
         self.btn_3dmod.clicked.connect(self._open_3dmod)
+        self.btn_etomo = QPushButton("Open in etomo")
+        self.btn_etomo.clicked.connect(self._open_etomo)
         self.btn_folder = QPushButton("Open folder")
         self.btn_folder.clicked.connect(self._open_folder)
-        top.addWidget(self.btn_3dmod)
-        top.addWidget(self.btn_folder)
+        for b in (self.btn_3dmod, self.btn_etomo, self.btn_folder):
+            top.addWidget(b)
         lay.addLayout(top)
 
-        self.title = QLabel("Select a processed tilt series, or use 'Test on one tilt' on the Tilts tab.")
-        self.title.setWordWrap(True)
-        lay.addWidget(self.title)
-
         split = QSplitter(Qt.Vertical)
+        view_card = card()
+        vl = QVBoxLayout(view_card)
+        vl.setContentsMargins(6, 6, 6, 6)
         self.image = pg.ImageView()
         self.image.ui.roiBtn.hide()
         self.image.ui.menuBtn.hide()
         self.image.sigTimeChanged.connect(self._time_changed)
-        split.addWidget(self.image)
+        vl.addWidget(self.image)
+        split.addWidget(view_card)
 
         plots = QWidget()
         pl = QHBoxLayout(plots)
         pl.setContentsMargins(0, 0, 0, 0)
+        accent = pg.mkColor(theme.ACCENT)
         self.drift_plot = pg.PlotWidget(title="Drift per tilt")
-        self.drift_plot.setLabel("bottom", "tilt angle", "deg")
-        self.drift_plot.setLabel("left", "total drift", "A")
-        self.drift_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.drift_scatter = pg.ScatterPlotItem(size=7, brush=pg.mkBrush(80, 160, 255, 200))
+        self.drift_plot.setLabel("bottom", "tilt angle (°)")
+        self.drift_plot.setLabel("left", "total drift (Å)")
+        self.drift_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.drift_scatter = pg.ScatterPlotItem(size=8, brush=pg.mkBrush(accent), pen=pg.mkPen(None))
         self.drift_scatter.sigClicked.connect(self._drift_clicked)
         self.drift_plot.addItem(self.drift_scatter)
-        self.drift_marker = pg.InfiniteLine(angle=90, pen=pg.mkPen((255, 170, 0), width=1))
+        self.drift_marker = pg.InfiniteLine(angle=90, pen=pg.mkPen(theme.WARNING, width=1))
         self.drift_plot.addItem(self.drift_marker)
-        self.traj_plot = pg.PlotWidget(title="Frame trajectory (current tilt)")
-        self.traj_plot.setLabel("bottom", "x shift", "A")
-        self.traj_plot.setLabel("left", "y shift", "A")
+        self.traj_plot = pg.PlotWidget(title="Frame trajectory")
+        self.traj_plot.setLabel("bottom", "x shift (Å)")
+        self.traj_plot.setLabel("left", "y shift (Å)")
         self.traj_plot.setAspectLocked(True)
-        self.traj_plot.showGrid(x=True, y=True, alpha=0.3)
-        pl.addWidget(self.drift_plot)
-        pl.addWidget(self.traj_plot)
+        self.traj_plot.showGrid(x=True, y=True, alpha=0.25)
+        for p in (self.drift_plot, self.traj_plot):
+            c = card()
+            cl = QVBoxLayout(c)
+            cl.setContentsMargins(6, 6, 6, 6)
+            cl.addWidget(p)
+            pl.addWidget(c)
         split.addWidget(plots)
-        split.setSizes([600, 220])
+        split.setSizes([620, 240])
         lay.addWidget(split, 1)
         self._set_buttons()
 
     # ------------------------------------------------------------------ series results
-    def clear(self):
+    def clear(self, message: str = "No results yet for this tilt series."):
         self.out_dir, self.record = None, None
         self.stack_combo.clear()
         self.image.clear()
         self.drift_scatter.clear()
         self.traj_plot.clear()
-        self.title.setText("No results yet for this tilt series.")
+        self.title.setText(message)
         self._set_buttons()
 
     def load_series(self, out_dir: Path) -> bool:
         """Show results for a series output folder; returns False if there are none."""
-        j = next(iter(sorted(Path(out_dir).glob("*_pyprep.json"))), None) if Path(out_dir).is_dir() else None
-        if j is None:
-            self.clear()
-            return False
+        out_dir = Path(out_dir)
+        j = next(iter(sorted(out_dir.glob("*_pyprep.json"))), None) if out_dir.is_dir() else None
         try:
-            rec = json.loads(j.read_text())
+            rec = json.loads(j.read_text()) if j else None
         except (OSError, ValueError):
+            rec = None
+        if rec is None:
             self.clear()
             return False
-        self.out_dir, self.record = Path(out_dir), rec
+        self.out_dir, self.record = out_dir, rec
         tilts = rec.get("tilts", [])
         self._angles = [t["angle"] for t in tilts]
         self._shifts = [np.asarray(t["shifts_px"]) for t in tilts]
-        drifts = [t["drift_A"] for t in tilts]
-        self.drift_scatter.setData(self._angles, drifts)
+        self.drift_scatter.setData(self._angles, [t["drift_A"] for t in tilts])
         self.stack_combo.blockSignals(True)
         self.stack_combo.clear()
-        outs = sorted(rec.get("outputs", []), key=lambda o: (-o["bin"], o["kind"] != "sum"))
-        for o in outs:
+        recon = rec.get("reconstruction") or {}
+        if not recon:
+            # Reconstructions run outside the batch still leave their record on disk.
+            for j in sorted(out_dir.glob("imod_bin*/pyprep_recon.json")):
+                try:
+                    recon = json.loads(j.read_text())
+                    rec["reconstruction"] = recon
+                except (OSError, ValueError):
+                    pass
+        tomo = recon.get("tomogram")
+        if tomo and Path(tomo).exists():
+            self.stack_combo.addItem(f"Tomogram   {Path(tomo).name}   ({Path(tomo).parent.name})", ("tomo", tomo))
+        for o in sorted(rec.get("outputs", []), key=lambda o: (-o["bin"], o["kind"] != "sum")):
             p = Path(o["path"])
             if not p.exists():
-                p = self.out_dir / p.name
+                p = out_dir / p.name
             nx, ny, nz = o["size"]
-            self.stack_combo.addItem(f"{p.name}   ({nx}x{ny}x{nz}, {o['pixel_size']:.2f} A/px)", str(p))
+            self.stack_combo.addItem(f"Tilt series   {p.name}   ({nx} x {ny} x {nz}, {o['pixel_size']:.2f} A/px)",
+                                     ("stack", str(p)))
         self.stack_combo.blockSignals(False)
         status = rec.get("status", "?")
-        missing = len(rec.get("missing", []))
-        self.title.setText(f"<b>{rec['series']}</b> - {status}, {len(tilts)} tilts"
-                           + (f", {missing} missing" if missing else "")
-                           + (f", {rec.get('seconds', 0):.0f} s on {rec.get('device', '')}" if status == "complete" else "")
-                           + (f"<br><span style='color:#c33'>{rec.get('error')}</span>" if rec.get("error") else ""))
+        parts = [f"<b>{rec['series']}</b>: stacks {status}, {len(tilts)} tilts"]
+        if rec.get("missing"):
+            parts.append(f"<span style='color:{theme.WARNING}'>{len(rec['missing'])} missing</span>")
+        if status == "complete":
+            parts.append(f"{rec.get('seconds', 0):.0f} s on {rec.get('device', '')}")
+        if recon:
+            color = theme.OK if recon.get("status") == "complete" else theme.DANGER
+            parts.append(f"<span style='color:{color}'>tomogram {recon.get('status')}</span>"
+                         + (f" ({recon.get('preset')}, {recon.get('seconds', 0):.0f} s)" if recon.get("seconds") else ""))
+        if rec.get("error"):
+            parts.append(f"<span style='color:{theme.DANGER}'>{rec['error']}</span>")
+        self.title.setText(" &nbsp;·&nbsp; ".join(parts))
         self._set_buttons()
         if self.stack_combo.count():
-            self._show_selected_stack()
+            # Prefer a binned tilt series for a quick first look.
+            idx = next((i for i in range(self.stack_combo.count())
+                        if self.stack_combo.itemData(i)[0] == "stack"), 0)
+            self.stack_combo.setCurrentIndex(idx)
+            self._show_selected()
         return True
 
-    def _show_selected_stack(self):
-        path = self.stack_combo.currentData()
-        if not path or not Path(path).exists():
+    def _show_selected(self):
+        data = self.stack_combo.currentData()
+        if not data or not Path(data[1]).exists():
             return
+        kind, path = data
         self.setCursor(Qt.WaitCursor)
         try:
-            data = load_display_stack(Path(path))
+            vol = load_display_stack(Path(path))
         finally:
             self.unsetCursor()
-        xvals = np.asarray(self._angles, dtype=float) if len(self._angles) == len(data) else None
-        self.image.setImage(data, xvals=xvals, autoLevels=False, levels=robust_levels(data[len(data) // 2]))
-        self.image.setCurrentIndex(len(data) // 2)
-        self._time_changed(len(data) // 2, None)
+        self._showing_tilts = kind == "stack"
+        xvals = (np.asarray(self._angles, dtype=float)
+                 if self._showing_tilts and len(self._angles) == len(vol) else None)
+        mid = len(vol) // 2
+        self.image.setImage(vol, xvals=xvals, autoLevels=False, levels=robust_levels(vol[mid]))
+        self.image.setCurrentIndex(mid)
+        self._time_changed(mid, None)
         self._set_buttons()
 
     def _time_changed(self, ind, _time):
-        if not self._shifts or ind >= len(self._shifts):
+        if not self._showing_tilts or not self._shifts or ind >= len(self._shifts):
             return
-        pix = self._pixel_size()
-        s = self._shifts[ind] * pix
+        s = self._shifts[ind] * self._pixel_size()
         self.traj_plot.clear()
-        self.traj_plot.plot(s[:, 1], s[:, 0], pen=pg.mkPen((80, 160, 255), width=2),
-                            symbol="o", symbolSize=6, symbolBrush=(80, 160, 255))
+        accent = theme.ACCENT
+        self.traj_plot.plot(s[:, 1], s[:, 0], pen=pg.mkPen(accent, width=2), symbol="o", symbolSize=7,
+                            symbolBrush=accent, symbolPen=None)
         if len(s):
-            self.traj_plot.plot([s[0, 1]], [s[0, 0]], pen=None, symbol="s", symbolSize=9, symbolBrush=(60, 200, 90))
+            self.traj_plot.plot([s[0, 1]], [s[0, 0]], pen=None, symbol="s", symbolSize=10,
+                                symbolBrush=theme.WARNING, symbolPen=None)
         self.traj_plot.setTitle(f"Frame trajectory at {self._angles[ind]:+.1f} deg (square = first frame)")
         self.drift_marker.setValue(self._angles[ind])
 
     def _drift_clicked(self, _item, points, *args):
-        if points is not None and len(points):
+        if points is not None and len(points) and self._showing_tilts:
             idx = int(np.argmin([abs(a - points[0].pos().x()) for a in self._angles]))
             self.image.setCurrentIndex(idx)
 
@@ -201,6 +245,7 @@ class ResultsPanel(QWidget):
         self.out_dir, self.record = None, {"pixel_size": pixel_size}
         self.stack_combo.clear()
         stack = np.stack([res["unaligned"], res["aligned"]])
+        self._showing_tilts = True
         self._angles = [res["tilt"].angle] * 2
         self._shifts = [res["shifts"], res["shifts"]]
         self.image.setImage(stack, xvals=np.array([0.0, 1.0]), autoLevels=False,
@@ -210,26 +255,43 @@ class ResultsPanel(QWidget):
         self._time_changed(1, None)
         conv = "converged" if res["converged"] else "NOT converged"
         self.title.setText(
-            f"<b>Preview</b> of tilt {res['tilt'].zvalue + 1:03d} ({res['tilt'].angle:+.2f} deg), bin {res['bin']}: "
-            f"drift {res['drift']:.2f} A, {res['iterations']} iterations ({conv}), "
-            f"mean score {np.mean(res['scores']):.3f}, {res['seconds']:.2f} s.  "
-            f"Slider: 0 = unaligned sum, 1 = aligned sum.  Nothing was written to disk.")
+            f"<b>Preview</b> of tilt {res['tilt'].zvalue + 1:03d} ({res['tilt'].angle:+.2f} deg), "
+            f"bin {res['bin']}: drift {res['drift']:.2f} A, {res['iterations']} iterations ({conv}), "
+            f"mean score {np.mean(res['scores']):.3f}, {res['seconds']:.2f} s. &nbsp;Slider: 0 = unaligned, "
+            f"1 = aligned. Nothing was written to disk.")
         self._set_buttons()
 
     # ------------------------------------------------------------------ IMOD / folders
+    def _edf(self) -> Path | None:
+        recon = (self.record or {}).get("reconstruction") or {}
+        d = recon.get("recon_dir")
+        if d and Path(d).is_dir():
+            edfs = sorted(Path(d).glob("*.edf"))
+            return edfs[0] if edfs else None
+        return None
+
     def _set_buttons(self):
-        has_stack = bool(self.stack_combo.currentData())
-        self.btn_3dmod.setEnabled(has_stack and imod_program("3dmod") is not None)
+        data = self.stack_combo.currentData()
+        self.btn_3dmod.setEnabled(bool(data) and imod_program("3dmod") is not None)
+        self.btn_etomo.setEnabled(self._edf() is not None and imod_program("etomo") is not None)
         self.btn_folder.setEnabled(self.out_dir is not None)
+
+    def _launch(self, exe, args, cwd):
+        try:
+            subprocess.Popen([exe, *args], cwd=str(cwd))
+        except OSError as e:
+            QMessageBox.warning(self, "pyPrep", f"Could not start {Path(exe).name}:\n{e}")
 
     def _open_3dmod(self):
         exe = imod_program("3dmod")
-        path = self.stack_combo.currentData()
-        if exe and path:
-            try:
-                subprocess.Popen([exe, path], cwd=str(Path(path).parent))
-            except OSError as e:
-                QMessageBox.warning(self, "pyPrep", f"Could not start 3dmod:\n{e}")
+        data = self.stack_combo.currentData()
+        if exe and data:
+            self._launch(exe, [data[1]], Path(data[1]).parent)
+
+    def _open_etomo(self):
+        exe, edf = imod_program("etomo"), self._edf()
+        if exe and edf:
+            self._launch(exe, [edf.name], edf.parent)
 
     def _open_folder(self):
         if self.out_dir:

@@ -140,3 +140,40 @@ def test_axis_masking_defeats_fixed_pattern():
     frames, truth = make_movie(seed=3, row_pattern=0.3)
     unmasked = MotionCorrector(MotionSettings(mask_axes=False)).align(frames, 3.3)
     assert np.abs(unmasked.shifts - (truth - truth.mean(0))).max() > 1.0   # pinned by stripes
+
+
+# ---------------------------------------------------------------- reconstruction settings
+def test_directives_patch_and_gold():
+    from pyprep.imod import ReconSettings, build_directives
+    d = build_directives(13.2, 86.2, 300, ReconSettings())
+    assert d["runtime.Fiducials.any.trackingMethod"] == "1"
+    assert d["comparam.xcorr_pt.tiltxcorr.SizeOfPatchesXandY"] == "303,303"   # 400 nm at 1.32 nm/px
+    assert d["setupset.copyarg.pixel"] == "1.3200" and d["setupset.copyarg.rotation"] == "86.20"
+    assert d["runtime.Reconstruction.any.fallbackThickness"] == "152"
+    assert "comparam.tilt.tilt.THICKNESS" not in d          # IMOD forbids it together with fallback
+    g = build_directives(13.2, 86.2, 300, ReconSettings(preset="gold", positioning="fixed",
+                                                        extra_directives="comparam.x.y.Z = 3"))
+    assert g["runtime.Fiducials.any.trackingMethod"] == "0" and g["setupset.copyarg.gold"] == "10"
+    assert g["comparam.tilt.tilt.THICKNESS"] == "152" and "runtime.Reconstruction.any.fallbackThickness" not in g
+    assert g["comparam.x.y.Z"] == "3"
+
+
+def test_settings_roundtrip_with_recon(tmp_path):
+    from pyprep.settings import ProcessingSettings
+    s = ProcessingSettings()
+    s.recon.enabled, s.recon.preset, s.output.bin_levels = True, "gold", [2]
+    s.save(tmp_path / "s.json")
+    t = ProcessingSettings.load(tmp_path / "s.json")
+    assert t.recon.enabled and t.recon.preset == "gold" and t.output.bin_levels == [2]
+
+
+def test_recon_stack_added_to_outputs(tmp_path):
+    from pyprep.pipeline import planned_outputs
+    from pyprep.settings import ProcessingSettings
+    (tmp_path / "TS_1.mdoc").write_text(TOMO5_MDOC)
+    ts = load_tilt_series(tmp_path / "TS_1.mdoc")
+    s = ProcessingSettings()
+    s.output.bin_levels = [1]
+    s.recon.enabled = True
+    names = [o.path.name for o in planned_outputs(ts, s, tmp_path)]
+    assert names == ["TS_1.mrc", "TS_1_bin4.mrc"]

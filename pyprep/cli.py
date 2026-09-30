@@ -36,7 +36,7 @@ def cmd_scan(args) -> int:
 
 
 def cmd_run(args) -> int:
-    from .pipeline import is_complete, process_series
+    from .pipeline import run_series
     from .settings import ProcessingSettings
 
     settings = ProcessingSettings.load(args.settings) if args.settings else ProcessingSettings()
@@ -63,6 +63,17 @@ def cmd_run(args) -> int:
         settings.use_gpu = False
     if args.force:
         settings.skip_existing = False
+    r = settings.recon
+    if args.reconstruct:
+        r.enabled = True
+    if args.preset:
+        r.preset = args.preset
+    if args.recon_bin:
+        r.bin = args.recon_bin
+    if args.thickness:
+        r.thickness_nm = args.thickness
+    if args.fixed_thickness:
+        r.positioning = "fixed"
 
     series = _collect(args.inputs, args.recursive, settings.frames_dir, settings.default_dose)
     if not series:
@@ -72,17 +83,20 @@ def cmd_run(args) -> int:
     failures = 0
     for i, s in enumerate(series, 1):
         print(f"[{i}/{len(series)}] {s.summary()}")
-        if settings.skip_existing and is_complete(s, settings, out_root):
-            print("    already complete - skipping (use --force to redo)")
-            continue
 
         def progress(done, total, msg):
             print(f"\r    {msg:<40s}", end="", flush=True)
 
+        def say(line):
+            if not args.quiet:
+                print("\r    " + line)
+
         try:
-            rec = process_series(s, settings, out_root, progress=progress,
-                                 log_callback=None if args.quiet else (lambda line: print("\r    " + line)))
-            print(f"\r    {rec['status']} in {rec['seconds']} s -> {out_root / s.name}")
+            res = run_series(s, settings, out_root, progress=progress, log_callback=say)
+            print(f"\r    stacks: {res['stacks']}, tomogram: {res['recon'] or '-'} "
+                  f"({res['seconds']} s) -> {out_root / s.name}")
+            if res["stacks"] not in ("complete", "skipped") or res["recon"] in ("failed", "cancelled"):
+                failures += 1
         except Exception as e:  # keep going with the rest of the batch
             failures += 1
             print(f"\r    FAILED: {e}")
@@ -103,7 +117,7 @@ def main(argv=None) -> int:
     common(p)
     p.set_defaults(func=cmd_scan)
 
-    p = sub.add_parser("run", help="motion-correct and build tilt-series stacks")
+    p = sub.add_parser("run", help="motion-correct, build tilt-series stacks, optionally reconstruct")
     common(p)
     p.add_argument("-o", "--output", required=True, help="output folder (one subfolder per series)")
     p.add_argument("--settings", help="JSON settings file (e.g. saved from the GUI)")
@@ -116,6 +130,11 @@ def main(argv=None) -> int:
     p.add_argument("--align-bin", type=int, help="binning used for measuring shifts (default 4)")
     p.add_argument("--bfactor", type=float, help="B-factor for alignment in A^2 (default 500)")
     p.add_argument("--cpu", action="store_true", help="do not use the GPU")
+    p.add_argument("--reconstruct", action="store_true", help="run IMOD batchruntomo after alignment")
+    p.add_argument("--preset", choices=["patch", "gold"], help="batchruntomo preset (default patch)")
+    p.add_argument("--recon-bin", type=int, help="binning of the stack to reconstruct (default 4)")
+    p.add_argument("--thickness", type=float, help="reconstruction (fallback) thickness in nm")
+    p.add_argument("--fixed-thickness", action="store_true", help="skip IMOD positioning, use --thickness")
     p.add_argument("--force", action="store_true", help="reprocess series that are already complete")
     p.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_run)

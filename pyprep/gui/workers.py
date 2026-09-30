@@ -9,14 +9,14 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot
 
-from ..pipeline import is_complete, process_series
+from ..pipeline import run_series
 from ..settings import ProcessingSettings
 
 
 class BatchWorker(QObject):
     series_started = Signal(int)
-    series_progress = Signal(int, int, int, str)     # row, done, total, message
-    series_finished = Signal(int, str, float)        # row, status, seconds
+    series_progress = Signal(int, int, int, str)     # row, done (-1 = message only), total, message
+    series_finished = Signal(int, object)            # row, {"stacks", "recon", "seconds"}
     log = Signal(str)
     finished = Signal()
 
@@ -34,23 +34,19 @@ class BatchWorker(QObject):
     def run(self):
         for row, series in self.jobs:
             if self._cancel.is_set():
-                self.series_finished.emit(row, "cancelled", 0.0)
-                continue
-            if self.settings.skip_existing and is_complete(series, self.settings, self.out_root):
-                self.log.emit(f"{series.name}: outputs already complete - skipped")
-                self.series_finished.emit(row, "skipped", 0.0)
+                self.series_finished.emit(row, {"stacks": "cancelled", "recon": None, "seconds": 0})
                 continue
             self.series_started.emit(row)
             self.log.emit(f"===== {series.name} =====")
             try:
-                rec = process_series(
+                res = run_series(
                     series, self.settings, self.out_root,
                     progress=lambda d, n, m, r=row: self.series_progress.emit(r, d, n, m),
                     cancel=self._cancel, log_callback=self.log.emit)
-                self.series_finished.emit(row, rec["status"], float(rec.get("seconds", 0)))
             except Exception as e:  # report and continue with the next series
                 self.log.emit(f"{series.name} FAILED: {e}\n{traceback.format_exc()}")
-                self.series_finished.emit(row, "failed", 0.0)
+                res = {"stacks": "failed", "recon": None, "seconds": 0}
+            self.series_finished.emit(row, res)
         self.finished.emit()
 
 

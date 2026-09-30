@@ -1,21 +1,36 @@
-"""Settings tab: frame alignment, output stacks and processing options."""
+"""Settings forms, split across the Frame alignment, Outputs and Reconstruction pages.
+
+One :class:`SettingsForms` object owns every settings widget so the whole
+configuration can be read or restored at once; the main window places its
+page widgets (``alignment_page``, ``outputs_page``, ``recon_page``).
+"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
-                               QVBoxLayout, QWidget, QMessageBox)
+import os
 
-from .. import gpu
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+                               QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                               QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout,
+                               QWidget)
+
+from .. import gpu, imod
+from ..imod import ReconSettings
 from ..motion import MotionSettings
 from ..settings import OutputSettings, ProcessingSettings
+from . import theme
+from .theme import card, dim_label, section_label, title_label
 
 BIN_CHOICES = (1, 2, 4, 8)
 
 
+FIELD_WIDTH = 200
+
+
 def _dspin(lo, hi, step, decimals, suffix="", tip=""):
     w = QDoubleSpinBox()
+    w.setMinimumWidth(FIELD_WIDTH)
     w.setRange(lo, hi)
     w.setSingleStep(step)
     w.setDecimals(decimals)
@@ -25,23 +40,72 @@ def _dspin(lo, hi, step, decimals, suffix="", tip=""):
     return w
 
 
-def _ispin(lo, hi, tip=""):
+def _ispin(lo, hi, tip="", suffix=""):
     w = QSpinBox()
+    w.setMinimumWidth(FIELD_WIDTH)
     w.setRange(lo, hi)
     w.setToolTip(tip)
+    if suffix:
+        w.setSuffix(suffix)
     return w
 
 
-class SettingsPanel(QWidget):
+def _card_with_form(title: str | None = None, note: str | None = None):
+    """A pyFIB-style card containing an optional section title, note and a form."""
+    c = card()
+    v = QVBoxLayout(c)
+    v.setContentsMargins(16, 14, 16, 14)
+    v.setSpacing(8)
+    if title:
+        v.addWidget(section_label(title))
+    if note:
+        v.addWidget(dim_label(note))
+    f = QFormLayout()
+    f.setHorizontalSpacing(18)
+    f.setVerticalSpacing(10)
+    f.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+    v.addLayout(f)
+    return c, v, f
+
+
+def _page(title: str, intro: str) -> tuple[QWidget, QVBoxLayout]:
+    w = QWidget()
+    lay = QVBoxLayout(w)
+    lay.setContentsMargins(22, 18, 22, 18)
+    lay.setSpacing(12)
+    lay.addWidget(title_label(title))
+    lay.addWidget(dim_label(intro))
+    return w, lay
+
+
+class SettingsForms(QObject):
     changed = Signal()
+    preview_requested = Signal()
+    show_directives_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        lay = QVBoxLayout(self)
+        self.alignment_page = self._build_alignment()
+        self.outputs_page = self._build_outputs()
+        self.recon_page = self._build_recon()
+        self.set_settings(ProcessingSettings())
+        for page in (self.alignment_page, self.outputs_page, self.recon_page):
+            for w in page.findChildren(QSpinBox) + page.findChildren(QDoubleSpinBox):
+                w.valueChanged.connect(self.changed)
+            for w in page.findChildren(QCheckBox):
+                w.toggled.connect(self.changed)
+            for w in page.findChildren(QComboBox):
+                w.currentIndexChanged.connect(self.changed)
+        self.exclude.textChanged.connect(self.changed)
 
-        # ---- frame alignment
-        g = QGroupBox("Frame alignment")
-        f = QFormLayout(g)
+    # ------------------------------------------------------------------ pages
+    def _build_alignment(self) -> QWidget:
+        page, lay = _page(
+            "Frame alignment",
+            "Each tilt's dose fractions are aligned MotionCor-style: frames are Fourier-binned, "
+            "cross-correlated against the sum of all other frames, and the shifts refined until "
+            "they converge. Shifts are then applied at full resolution as Fourier phase ramps.")
+        c, v, f = _card_with_form("Alignment")
         self.align_bin = _ispin(1, 16, "Frames are Fourier-binned by this factor when measuring shifts.\n"
                                        "4 suits low-dose tomography fractions, whose shared signal is\n"
                                        "mostly coarser than ~30 A. Shifts are still applied at full resolution.")
@@ -61,18 +125,35 @@ class SettingsPanel(QWidget):
         f.addRow("Max iterations", self.iterations)
         f.addRow("Tolerance", self.tolerance)
         f.addRow("Group frames", self.group)
-        f.addRow(self.mask_axes)
-        lay.addWidget(g)
+        f.addRow("", self.mask_axes)
+        lay.addWidget(c)
 
-        # ---- outputs
-        g = QGroupBox("Output stacks (one set per tilt series, sorted by tilt angle)")
-        f = QFormLayout(g)
-        self.out_aligned = QCheckBox("Aligned sum  (<name>.mrc)")
-        self.out_evenodd = QCheckBox("Even / odd half-sums  (_EVN / _ODD, for denoising)")
-        self.out_dw = QCheckBox("Dose-weighted sum  (_DW; skip etomo's dose weighting on this one)")
+        c, v, f = _card_with_form(
+            "Try it", "Align one tilt of the selected series with these settings and compare the "
+                      "unaligned and aligned sums on the Results page. Nothing is written to disk. "
+                      "Pick the tilt on the Tilt series page (default: the one nearest 0 deg).")
+        b = QPushButton("Test on one tilt")
+        b.setObjectName("toolButton")
+        b.clicked.connect(self.preview_requested)
+        self.preview_button_alignment = b
+        v.addWidget(b)
+        lay.addWidget(c)
+        lay.addStretch(1)
+        return page
+
+    def _build_outputs(self) -> QWidget:
+        page, lay = _page(
+            "Outputs",
+            "One set of stacks per tilt series, sorted by tilt angle, each with a matching "
+            ".rawtlt and .mrc.mdoc (tilt angles, tilt axis, pixel size and dose) that etomo reads directly.")
+        c, v, f = _card_with_form("Stacks")
+        self.out_aligned = QCheckBox("Aligned sum   (<name>.mrc)")
+        self.out_evenodd = QCheckBox("Even / odd half-sums   (_EVN / _ODD, for denoising)")
+        self.out_dw = QCheckBox("Dose-weighted sum   (_DW - skip etomo's own dose weighting on it)")
         for w in (self.out_aligned, self.out_evenodd, self.out_dw):
-            f.addRow(w)
+            f.addRow("", w)
         row = QHBoxLayout()
+        row.setSpacing(22)
         self.bin_boxes = {}
         for b in BIN_CHOICES:
             cb = QCheckBox(f"bin {b}")
@@ -82,50 +163,185 @@ class SettingsPanel(QWidget):
         row.addStretch()
         f.addRow("Binning levels", row)
         self.dtype = QComboBox()
+        self.dtype.setMinimumWidth(320)
         self.dtype.addItems(["float32", "int16"])
         self.dtype.setToolTip("int16 halves file size; lossless in practice for counting-camera data.")
         f.addRow("Data type", self.dtype)
         self.exclude = QLineEdit()
+        self.exclude.setMinimumWidth(420)
         self.exclude.setPlaceholderText("e.g. -46.1, 45.9   (applies to every series)")
         self.exclude.setToolTip("Tilt angles to leave out of every stack (within 0.5 deg).\n"
-                                "Per-series exclusions can be set on the Tilts tab.")
+                                "Per-series exclusions can be set on the Tilt series page.")
         f.addRow("Exclude angles", self.exclude)
-        lay.addWidget(g)
+        lay.addWidget(c)
 
-        # ---- processing
-        g = QGroupBox("Processing")
-        f = QFormLayout(g)
+        c, v, f = _card_with_form("Processing")
         self.device = QComboBox()
+        self.device.setMinimumWidth(320)
         for i, name in enumerate(gpu.list_gpus()):
             self.device.addItem(f"GPU {i}: {name}", ("gpu", i))
         self.device.addItem("CPU (slow)", ("cpu", 0))
-        self.skip_existing = QCheckBox("Skip series whose outputs are already complete")
+        self.skip_existing = QCheckBox("Skip steps whose outputs are already complete")
         self.default_dose = _dspin(0, 100, 0.1, 2, " e/A²", "Dose per tilt to assume when the mdoc has no\n"
                                                            "ExposureDose (0 = not set). Only used for dose weighting.")
         f.addRow("Compute on", self.device)
-        f.addRow(self.skip_existing)
+        f.addRow("", self.skip_existing)
         f.addRow("Fallback dose per tilt", self.default_dose)
-        lay.addWidget(g)
+        lay.addWidget(c)
 
+        c, v, f = _card_with_form("Settings file", "Save these settings (all pages) to reuse them, "
+                                                   "or to run the same job from the command line.")
         row = QHBoxLayout()
-        for text, slot in (("Load settings...", self._load), ("Save settings...", self._save),
+        for text, slot in (("Load settings...", self.load_dialog), ("Save settings...", self.save_dialog),
                            ("Reset to defaults", lambda: self.set_settings(ProcessingSettings()))):
             b = QPushButton(text)
             b.clicked.connect(slot)
             row.addWidget(b)
         row.addStretch()
-        lay.addLayout(row)
-        lay.addStretch()
+        v.addLayout(row)
+        lay.addWidget(c)
+        lay.addStretch(1)
+        return page
 
-        self.set_settings(ProcessingSettings())
-        for w in self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox):
-            w.valueChanged.connect(self.changed)
-        for w in self.findChildren(QCheckBox):
-            w.toggled.connect(self.changed)
-        self.dtype.currentIndexChanged.connect(self.changed)
-        self.exclude.textChanged.connect(self.changed)
+    def _build_recon(self) -> QWidget:
+        page, lay = _page(
+            "Reconstruction",
+            "After frame alignment pyPrep can run IMOD's batchruntomo on the binned stack of each "
+            "series. The result is a normal etomo project in <series>/imod_bin<N>/ that you can "
+            "open in etomo to inspect or redo any step.")
+        ok, msg = imod.imod_status()
+        self.imod_label = QLabel(("IMOD found: " if ok else "") + msg)
+        self.imod_label.setWordWrap(True)
+        self.imod_label.setStyleSheet(f"color: {theme.OK if ok else theme.DANGER};")
+        lay.addWidget(self.imod_label)
 
-    # ------------------------------------------------------------------
+        c, v, f = _card_with_form()
+        self.recon_enabled = QCheckBox("Reconstruct each series with IMOD batchruntomo after frame alignment")
+        self.recon_enabled.setStyleSheet("font-weight: 700;")
+        v.addWidget(self.recon_enabled)
+        lay.addWidget(c)
+
+        c, v, f = _card_with_form("Alignment preset")
+        row = QHBoxLayout()
+        self.preset_group = QButtonGroup(self)
+        self.preset_group.setExclusive(True)
+        self.preset_buttons = {}
+        for key, label in imod.PRESETS.items():
+            b = QPushButton(label)
+            b.setObjectName("toolButton")
+            b.setCheckable(True)
+            b.setMinimumWidth(260)
+            self.preset_group.addButton(b)
+            self.preset_buttons[key] = b
+            row.addWidget(b)
+        row.addStretch()
+        v.addLayout(row)
+        self.preset_stack = QStackedWidget()
+        self.preset_stack.setObjectName("cardBody")
+        # patch tracking parameters
+        pw = QWidget()
+        pw.setObjectName("cardBody")
+        pf = QFormLayout(pw)
+        pf.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        pf.setContentsMargins(0, 6, 0, 0)
+        pf.addRow(dim_label("Tracks overlapping image patches through the series - no fiducials needed. "
+                            "Defaults match the reference Position_9_2 etomo project (1200 px patches at "
+                            "3.3 A, overlap 0.6)."))
+        self.patch_size = _dspin(50, 3000, 50, 0, " nm", "Edge length of each tracked patch.")
+        self.patch_overlap = _dspin(0, 0.9, 0.05, 2, "", "Fractional overlap between neighbouring patches.")
+        pf.addRow("Patch size", self.patch_size)
+        pf.addRow("Patch overlap", self.patch_overlap)
+        self.preset_stack.addWidget(pw)
+        # gold parameters
+        gw = QWidget()
+        gw.setObjectName("cardBody")
+        gf = QFormLayout(gw)
+        gf.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        gf.setContentsMargins(0, 6, 0, 0)
+        gf.addRow(dim_label("Seeds and tracks gold beads automatically (autofidseed + beadtrack), "
+                            "as in the lab's Linux batchruntomo script, and erases them from the stack."))
+        self.gold_size = _dspin(1, 50, 1, 1, " nm", "Gold bead diameter.")
+        self.gold_beads = _ispin(3, 500, "Number of beads autofidseed tries to pick.")
+        self.erase_gold = QCheckBox("Erase gold from the aligned stack")
+        gf.addRow("Bead size", self.gold_size)
+        gf.addRow("Beads to track", self.gold_beads)
+        gf.addRow("", self.erase_gold)
+        self.preset_stack.addWidget(gw)
+        v.addWidget(self.preset_stack)
+        self.preset_group.buttonToggled.connect(self._preset_toggled)
+        lay.addWidget(c)
+
+        c, v, f = _card_with_form("Tomogram")
+        self.recon_bin = QComboBox()
+        self.recon_bin.setMinimumWidth(320)
+        for b in BIN_CHOICES:
+            self.recon_bin.addItem(f"bin {b}", b)
+        self.recon_bin.setToolTip("Which pyPrep stack to reconstruct. It is written automatically\n"
+                                  "even if that binning is not ticked on the Outputs page.")
+        self.recon_source = QComboBox()
+        self.recon_source.setMinimumWidth(320)
+        self.recon_source.addItem("Aligned sum", False)
+        self.recon_source.addItem("Dose-weighted sum", True)
+        self.positioning = QComboBox()
+        self.positioning.setMinimumWidth(320)
+        self.positioning.addItem("Automatic (IMOD cryo positioning)", "auto")
+        self.positioning.addItem("Fixed thickness (skip positioning)", "fixed")
+        self.positioning.setToolTip("Automatic finds the specimen slab and sets thickness and pitch.\n"
+                                    "Sparse samples can defeat it; the thickness below is then used.")
+        self.pos_thickness = _dspin(20, 5000, 10, 0, " nm", "Thickness of the trial tomogram used for positioning.")
+        self.thickness = _dspin(20, 5000, 10, 0, " nm")
+        self.thickness_label = QLabel("Fallback thickness")
+        self.sirt = _ispin(0, 100, "SIRT-like radial filter equivalent to this many SIRT iterations\n"
+                                   "(better low-resolution contrast). 0 = plain weighted back-projection.")
+        self.remove_xrays = QCheckBox("Remove X-rays / hot pixels (ccderaser)")
+        self.cpus = _ispin(1, os.cpu_count() or 1, "CPU cores IMOD may use.")
+        self.imod_gpu = QCheckBox("Use GPU for back-projection (IMOD tilt)")
+        f.addRow("Stack binning", self.recon_bin)
+        f.addRow("Stack", self.recon_source)
+        f.addRow("Positioning", self.positioning)
+        self.pos_thickness_label = QLabel("Positioning thickness")
+        f.addRow(self.pos_thickness_label, self.pos_thickness)
+        f.addRow(self.thickness_label, self.thickness)
+        f.addRow("SIRT-like filter", self.sirt)
+        f.addRow("CPU cores", self.cpus)
+        f.addRow("", self.remove_xrays)
+        f.addRow("", self.imod_gpu)
+        self.positioning.currentIndexChanged.connect(self._positioning_changed)
+        lay.addWidget(c)
+
+        c, v, f = _card_with_form("Advanced", "Extra batchruntomo directives, one 'key = value' per line. "
+                                              "They override the preset (see IMOD's directives.csv).")
+        self.extra = QPlainTextEdit()
+        self.extra.setPlaceholderText("comparam.align.tiltalign.LocalAlignments = 1")
+        self.extra.setMaximumHeight(90)
+        self.extra.textChanged.connect(self.changed)
+        v.addWidget(self.extra)
+        b = QPushButton("Show directives for the selected series")
+        b.clicked.connect(self.show_directives_requested)
+        row = QHBoxLayout()
+        row.addWidget(b)
+        row.addStretch()
+        v.addLayout(row)
+        lay.addWidget(c)
+        lay.addStretch(1)
+        return page
+
+    def _preset_toggled(self, button, checked):
+        if checked:
+            keys = list(self.preset_buttons)
+            idx = keys.index(next(k for k, b in self.preset_buttons.items() if b is button))
+            self.preset_stack.setCurrentIndex(idx)
+            self.changed.emit()
+
+    def _positioning_changed(self):
+        auto = self.positioning.currentData() == "auto"
+        self.pos_thickness.setEnabled(auto)
+        self.pos_thickness_label.setEnabled(auto)
+        self.thickness_label.setText("Fallback thickness" if auto else "Thickness")
+        self.thickness.setToolTip("Used if automatic positioning fails." if auto
+                                  else "Reconstruction thickness.")
+
+    # ------------------------------------------------------------------ get / set
     def get_settings(self) -> ProcessingSettings:
         m = MotionSettings(align_bin=self.align_bin.value(), bfactor=self.bfactor.value(),
                            max_iterations=self.iterations.value(), tolerance=self.tolerance.value(),
@@ -133,24 +349,34 @@ class SettingsPanel(QWidget):
                            group=self.group.value())
         excl = []
         for tok in self.exclude.text().replace(";", ",").split(","):
-            tok = tok.strip()
-            if tok:
-                try:
-                    excl.append(float(tok))
-                except ValueError:
-                    pass
+            try:
+                excl.append(float(tok.strip()))
+            except ValueError:
+                pass
         o = OutputSettings(bin_levels=[b for b, cb in self.bin_boxes.items() if cb.isChecked()],
                            aligned=self.out_aligned.isChecked(), even_odd=self.out_evenodd.isChecked(),
                            dose_weighted=self.out_dw.isChecked(), dtype=self.dtype.currentText(),
                            exclude_angles=excl)
+        preset = next((k for k, b in self.preset_buttons.items() if b.isChecked()), "patch")
+        r = ReconSettings(enabled=self.recon_enabled.isChecked(), preset=preset,
+                          bin=int(self.recon_bin.currentData()),
+                          use_dose_weighted=bool(self.recon_source.currentData()),
+                          patch_size_nm=self.patch_size.value(), patch_overlap=self.patch_overlap.value(),
+                          gold_size_nm=self.gold_size.value(), gold_beads=self.gold_beads.value(),
+                          erase_gold=self.erase_gold.isChecked(),
+                          positioning=self.positioning.currentData(),
+                          positioning_thickness_nm=self.pos_thickness.value(),
+                          thickness_nm=self.thickness.value(), sirt_like_iterations=self.sirt.value(),
+                          remove_xrays=self.remove_xrays.isChecked(), cpus=self.cpus.value(),
+                          use_gpu=self.imod_gpu.isChecked(), extra_directives=self.extra.toPlainText())
         kind, idx = self.device.currentData()
         dose = self.default_dose.value()
-        return ProcessingSettings(motion=m, output=o, use_gpu=(kind == "gpu"), gpu_id=idx,
+        return ProcessingSettings(motion=m, output=o, recon=r, use_gpu=(kind == "gpu"), gpu_id=idx,
                                   skip_existing=self.skip_existing.isChecked(),
                                   default_dose=dose if dose > 0 else None)
 
     def set_settings(self, s: ProcessingSettings) -> None:
-        m, o = s.motion, s.output
+        m, o, r = s.motion, s.output, s.recon
         self.align_bin.setValue(int(m.align_bin))
         self.bfactor.setValue(m.bfactor)
         self.max_shift.setValue(m.max_shift)
@@ -172,25 +398,49 @@ class SettingsPanel(QWidget):
                 break
         self.skip_existing.setChecked(s.skip_existing)
         self.default_dose.setValue(s.default_dose or 0.0)
+        self.recon_enabled.setChecked(r.enabled)
+        self.preset_buttons.get(r.preset, self.preset_buttons["patch"]).setChecked(True)
+        self.recon_bin.setCurrentIndex(max(0, self.recon_bin.findData(int(r.bin))))
+        self.recon_source.setCurrentIndex(1 if r.use_dose_weighted else 0)
+        self.patch_size.setValue(r.patch_size_nm)
+        self.patch_overlap.setValue(r.patch_overlap)
+        self.gold_size.setValue(r.gold_size_nm)
+        self.gold_beads.setValue(r.gold_beads)
+        self.erase_gold.setChecked(r.erase_gold)
+        self.positioning.setCurrentIndex(max(0, self.positioning.findData(r.positioning)))
+        self.pos_thickness.setValue(r.positioning_thickness_nm)
+        self.thickness.setValue(r.thickness_nm)
+        self.sirt.setValue(r.sirt_like_iterations)
+        self.remove_xrays.setChecked(r.remove_xrays)
+        self.cpus.setValue(min(r.cpus, self.cpus.maximum()))
+        self.imod_gpu.setChecked(r.use_gpu)
+        self.extra.setPlainText(r.extra_directives)
+        self._positioning_changed()
 
     def validate(self) -> str | None:
         s = self.get_settings()
-        if not s.output.stack_kinds():
-            return "Select at least one output stack type."
-        if not s.output.bin_levels:
-            return "Select at least one binning level."
+        if not s.output.stack_kinds() and not s.recon.enabled:
+            return "Select at least one output stack type (Outputs page)."
+        if s.output.stack_kinds() and not s.output.bin_levels:
+            return "Select at least one binning level (Outputs page)."
+        if s.recon.enabled and not imod.imod_status()[0]:
+            return "Reconstruction is enabled but IMOD was not found:\n" + imod.imod_status()[1]
         return None
 
-    def _load(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Load settings", "", "pyPrep settings (*.json)")
+    def set_enabled(self, enabled: bool):
+        for p in (self.alignment_page, self.outputs_page, self.recon_page):
+            p.setEnabled(enabled)
+
+    def load_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(None, "Load settings", "", "pyPrep settings (*.json)")
         if path:
             try:
                 self.set_settings(ProcessingSettings.load(path))
             except Exception as e:
-                QMessageBox.warning(self, "pyPrep", f"Could not load settings:\n{e}")
+                QMessageBox.warning(None, "pyPrep", f"Could not load settings:\n{e}")
 
-    def _save(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save settings", "pyprep_settings.json",
+    def save_dialog(self):
+        path, _ = QFileDialog.getSaveFileName(None, "Save settings", "pyprep_settings.json",
                                               "pyPrep settings (*.json)")
         if path:
             self.get_settings().save(path)

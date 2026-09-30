@@ -1,4 +1,4 @@
-"""pyPrep main window: find tilt series, set options, run a batch, inspect results."""
+"""pyPrep main window, laid out like pyFIB: top bar, left navigation, stacked pages."""
 
 from __future__ import annotations
 
@@ -7,48 +7,71 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThread
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QFileDialog, QGridLayout,
+from PySide6.QtGui import QAction, QBrush, QColor, QIcon
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog, QFileDialog,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
-                               QPlainTextEdit, QProgressBar, QPushButton, QSplitter, QTableWidget,
-                               QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSplitter,
+                               QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import __version__, gpu
-from ..pipeline import is_complete
+from .. import __version__, gpu, imod
+from ..pipeline import is_complete, recon_complete
 from ..settings import ProcessingSettings
 from ..tiltseries import TiltSeries, find_mdocs, load_tilt_series
+from . import theme
 from .results_panel import ResultsPanel
-from .settings_panel import SettingsPanel
+from .settings_panel import SettingsForms
+from .theme import card, dim_label, section_label, title_label
 from .workers import BatchWorker, PreviewWorker
 
-STATUS_COLORS = {"done": "#2e8b57", "complete": "#2e8b57", "skipped": "#2e8b57", "running": "#1e6fd9",
-                 "failed": "#c0392b", "cancelled": "#b9770e", "queued": "#555555", "ready": "#555555"}
+APP_TITLE = "pyPrep"
+NAV = [
+    ("series", "Tilt series"),
+    ("alignment", "Frame alignment"),
+    ("outputs", "Outputs"),
+    ("recon", "Reconstruction"),
+    ("results", "Results"),
+    ("log", "Log"),
+]
+STATUS_COLORS = {"done": theme.OK, "running": theme.ACCENT_Hi, "failed": theme.DANGER,
+                 "cancelled": theme.WARNING, "queued": theme.TEXT_DIM, "ready": theme.TEXT_DIM,
+                 "-": theme.TEXT_DIM, "no frames": theme.DANGER}
+COL_NAME, COL_TILTS, COL_MISSING, COL_RANGE, COL_PIXEL, COL_STACKS, COL_TOMO, COL_TIME = range(8)
 
 
-def _item(text, align_right=False, editable=False) -> QTableWidgetItem:
+def _item(text, align_right=False) -> QTableWidgetItem:
     it = QTableWidgetItem(str(text))
-    if not editable:
-        it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+    it.setFlags(it.flags() & ~Qt.ItemIsEditable)
     if align_right:
         it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
     return it
 
 
-class FolderRow(QWidget):
-    def __init__(self, label: str, placeholder: str, parent=None):
+def _scroll(widget: QWidget) -> QScrollArea:
+    sa = QScrollArea()
+    sa.setWidget(widget)
+    sa.setWidgetResizable(True)
+    sa.setFrameShape(QScrollArea.NoFrame)
+    return sa
+
+
+class PathEdit(QWidget):
+    """Line edit + Browse button for a folder."""
+
+    def __init__(self, caption: str, placeholder: str, parent=None):
         super().__init__(parent)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self.caption = caption
         self.edit = QLineEdit()
         self.edit.setPlaceholderText(placeholder)
-        btn = QPushButton("Browse...")
+        btn = QPushButton("Browse…")
         btn.clicked.connect(self._browse)
-        self.label = label
         lay.addWidget(self.edit, 1)
         lay.addWidget(btn)
 
     def _browse(self):
-        d = QFileDialog.getExistingDirectory(self, self.label, self.edit.text() or "")
+        d = QFileDialog.getExistingDirectory(self, self.caption, self.edit.text() or "")
         if d:
             self.edit.setText(str(Path(d)))
 
@@ -57,10 +80,62 @@ class FolderRow(QWidget):
         return Path(t) if t else None
 
 
+class TopBar(QWidget):
+    """Shared across pages (like pyFIB's ArmBar): session + output folders."""
+
+    def __init__(self, on_scan, parent=None):
+        super().__init__(parent)
+        self.setObjectName("topBar")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(10)
+        lay.addWidget(QLabel("Session:"))
+        self.session = PathEdit("Session folder", "folder with the tilt-series .mdoc files")
+        lay.addWidget(self.session, 3)
+        lay.addSpacing(10)
+        lay.addWidget(QLabel("Output:"))
+        self.output = PathEdit("Output folder", "where stacks and tomograms go")
+        lay.addWidget(self.output, 3)
+        lay.addSpacing(10)
+        self.recursive = QCheckBox("Subfolders")
+        self.recursive.setToolTip("Also search subfolders of the session folder for .mdoc files")
+        lay.addWidget(self.recursive)
+        self.scan_btn = QPushButton("Find tilt series")
+        self.scan_btn.setObjectName("startButton")
+        self.scan_btn.clicked.connect(on_scan)
+        lay.addWidget(self.scan_btn)
+
+
+class LogPage(QWidget):
+    def __init__(self):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 18, 22, 18)
+        lay.addWidget(title_label("Log"))
+        lay.addWidget(dim_label("Everything pyPrep and IMOD report. Each series also keeps its own "
+                                "<name>_pyprep.log next to its outputs."))
+        self.view = QPlainTextEdit()
+        self.view.setReadOnly(True)
+        self.view.setMaximumBlockCount(50000)
+        self.view.setStyleSheet(f"font-family: Consolas, 'Courier New', monospace; font-size: 13px; "
+                                f"background: {theme.CANVAS_BG};")
+        lay.addWidget(self.view, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        b = QPushButton("Clear")
+        b.clicked.connect(self.view.clear)
+        row.addWidget(b)
+        lay.addLayout(row)
+
+    def append(self, text: str):
+        self.view.appendPlainText(text.rstrip())
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"pyPrep {__version__} - tilt-series preparation")
+        self.setWindowTitle(f"{APP_TITLE} {__version__}")
         self.qs = QSettings("pyPrep", "pyPrep")
         self.series: list[TiltSeries] = []
         self._thread: QThread | None = None
@@ -68,146 +143,189 @@ class MainWindow(QMainWindow):
         self._on_done = None
         self._preview_series = None
 
-        # ---------------- left: inputs + series table
-        left = QWidget()
-        ll = QVBoxLayout(left)
-        grid = QGridLayout()
-        self.in_row = FolderRow("Session folder", "Folder with the .mdoc files")
-        self.frames_row = FolderRow("Frames folder", "Optional - where the fraction files are, if not next to the mdoc")
-        self.out_row = FolderRow("Output folder", "Where aligned stacks go (one subfolder per tilt series)")
-        grid.addWidget(QLabel("Session:"), 0, 0)
-        grid.addWidget(self.in_row, 0, 1)
-        grid.addWidget(QLabel("Frames:"), 1, 0)
-        grid.addWidget(self.frames_row, 1, 1)
-        grid.addWidget(QLabel("Output:"), 2, 0)
-        grid.addWidget(self.out_row, 2, 1)
-        ll.addLayout(grid)
-        row = QHBoxLayout()
-        self.recursive = QCheckBox("Include subfolders")
-        self.btn_scan = QPushButton("Find tilt series")
-        self.btn_scan.setDefault(True)
-        self.btn_scan.clicked.connect(self.scan)
-        row.addWidget(self.recursive)
-        row.addStretch()
-        row.addWidget(self.btn_scan)
-        ll.addLayout(row)
+        central = QWidget()
+        self.setCentralWidget(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.top = TopBar(self.scan)
+        outer.addWidget(self.top)
 
-        self.table = QTableWidget(0, 7)
+        content = QWidget()
+        root = QHBoxLayout(content)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        outer.addWidget(content, 1)
+
+        # ---------------- pages
+        self.forms = SettingsForms(self)
+        self.forms.changed.connect(self._settings_changed)
+        self.forms.preview_requested.connect(self.preview)
+        self.forms.show_directives_requested.connect(self.show_directives)
+        self.results = ResultsPanel()
+        self.log_page = LogPage()
+        self._pages = {
+            "series": self._build_series_page(),
+            "alignment": _scroll(self.forms.alignment_page),
+            "outputs": _scroll(self.forms.outputs_page),
+            "recon": _scroll(self.forms.recon_page),
+            "results": self.results,
+            "log": self.log_page,
+        }
+        self.stack = QStackedWidget()
+        for key, _ in NAV:
+            self.stack.addWidget(self._pages[key])
+
+        root.addWidget(self._build_nav())
+        root.addWidget(self.stack, 1)
+
+        self._build_menu()
+        devs = gpu.list_gpus()
+        ok, imod_msg = imod.imod_status()
+        self.statusBar().addPermanentWidget(QLabel(
+            (f"GPU: {devs[0]}" if devs else "No CUDA GPU - CPU mode") + "   ·   "
+            + (f"IMOD {imod.imod_version()}" if ok else "IMOD not found") + "  "))
+        self.statusBar().showMessage("Ready")
+        self._restore()
+        self.show_page("series")
+
+    # ------------------------------------------------------------------ building
+    def _build_nav(self) -> QWidget:
+        nav = QWidget()
+        nav.setObjectName("navBar")
+        nav.setAttribute(Qt.WA_StyledBackground, True)
+        nav.setFixedWidth(230)
+        lay = QVBoxLayout(nav)
+        lay.setContentsMargins(12, 16, 12, 14)
+        lay.setSpacing(6)
+        brand = QLabel(APP_TITLE)
+        brand.setStyleSheet(f"font-size: 28px; font-weight: 800; color: {theme.TEXT};")
+        lay.addWidget(brand)
+        sub = dim_label("cryo-ET tilt-series prep")
+        lay.addWidget(sub)
+        lay.addSpacing(12)
+        self._nav_buttons: dict[str, QPushButton] = {}
+        for key, label in NAV:
+            b = QPushButton(label)
+            b.setObjectName("toolButton")
+            b.setCheckable(True)
+            b.setMinimumHeight(44)
+            b.clicked.connect(lambda _=False, k=key: self.show_page(k))
+            lay.addWidget(b)
+            self._nav_buttons[key] = b
+        lay.addStretch(1)
+
+        run = card()
+        rl = QVBoxLayout(run)
+        rl.setContentsMargins(10, 10, 10, 10)
+        rl.setSpacing(6)
+        rl.addWidget(section_label("Batch"))
+        self.run_msg = dim_label("Idle")
+        rl.addWidget(self.run_msg)
+        self.overall = QProgressBar()
+        self.overall.setRange(0, 1)
+        self.overall.setValue(0)
+        self.overall.setFormat("no batch running")
+        self.current = QProgressBar()
+        self.current.setFormat("%p%")
+        rl.addWidget(self.overall)
+        rl.addWidget(self.current)
+        self.btn_start = QPushButton("Start")
+        self.btn_start.setObjectName("startButton")
+        self.btn_start.setToolTip("Process every checked tilt series with the current settings")
+        self.btn_start.clicked.connect(self.start)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setObjectName("cancelButton")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self.cancel)
+        rl.addWidget(self.btn_start)
+        rl.addWidget(self.btn_cancel)
+        lay.addWidget(run)
+        return nav
+
+    def _build_series_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(22, 18, 22, 18)
+        lay.setSpacing(10)
+        lay.addWidget(title_label("Tilt series"))
+        lay.addWidget(dim_label(
+            "pyPrep finds every tilt-series .mdoc in the session folder and matches each tilt to its "
+            "fraction file. Check the series to process; uncheck single tilts below to leave them out."))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Fractions folder:"))
+        self.frames_path = PathEdit("Fractions folder", "optional - only if the fraction files are not next to the mdoc")
+        row.addWidget(self.frames_path, 1)
+        lay.addLayout(row)
+
+        split = QSplitter(Qt.Vertical)
+        c = card()
+        cl = QVBoxLayout(c)
+        cl.setContentsMargins(12, 12, 12, 12)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(["Tilt series", "Tilts", "Missing", "Range (deg)",
-                                              "Pixel (A)", "Status", "Time"])
+                                              "Pixel (A)", "Stacks", "Tomogram", "Time"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().hide()
+        self.table.setShowGrid(False)
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Stretch)
-        for c in range(1, 7):
-            hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
+        for col in range(1, 8):
+            hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self._series_selected)
-        ll.addWidget(self.table, 1)
+        cl.addWidget(self.table, 1)
         row = QHBoxLayout()
         for text, state in (("Check all", True), ("Uncheck all", False)):
             b = QPushButton(text)
             b.clicked.connect(lambda _=False, s=state: self._check_all(s))
             row.addWidget(b)
         row.addStretch()
-        ll.addLayout(row)
+        self.series_count = dim_label("", wrap=False)
+        row.addWidget(self.series_count)
+        cl.addLayout(row)
+        split.addWidget(c)
 
-        # ---------------- right: tabs
-        self.tabs = QTabWidget()
-        self.settings_panel = SettingsPanel()
-        self.settings_panel.changed.connect(self._settings_changed)
-        self.tabs.addTab(self._scroll(self.settings_panel), "Settings")
-        self.tabs.addTab(self._build_tilts_tab(), "Tilts")
-        self.results = ResultsPanel()
-        self.tabs.addTab(self.results, "Results")
-
-        top = QSplitter(Qt.Horizontal)
-        top.addWidget(left)
-        top.addWidget(self.tabs)
-        top.setSizes([640, 760])
-
-        # ---------------- bottom: run controls, progress, log
-        bottom = QWidget()
-        bl = QVBoxLayout(bottom)
-        row = QHBoxLayout()
-        self.btn_start = QPushButton("Start processing checked series")
-        f = self.btn_start.font()
-        f.setBold(True)
-        self.btn_start.setFont(f)
-        self.btn_start.clicked.connect(self.start)
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.clicked.connect(self.cancel)
-        self.overall = QProgressBar()
-        self.overall.setFormat("Batch: %v / %m series")
-        self.current = QProgressBar()
-        self.current.setFormat("%p%")
-        row.addWidget(self.btn_start)
-        row.addWidget(self.btn_cancel)
-        row.addWidget(self.overall, 1)
-        row.addWidget(self.current, 1)
-        bl.addLayout(row)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(20000)
-        self.log.setFont(QFont("Consolas", 9))
-        bl.addWidget(self.log)
-
-        main = QSplitter(Qt.Vertical)
-        main.addWidget(top)
-        main.addWidget(bottom)
-        main.setSizes([700, 220])
-        self.setCentralWidget(main)
-
-        devs = gpu.list_gpus()
-        self.statusBar().showMessage(f"GPU: {devs[0]}" if devs else "No CUDA GPU found - running on CPU")
-        self._build_menu()
-        self._restore()
-
-    # ------------------------------------------------------------------ layout helpers
-    @staticmethod
-    def _scroll(widget):
-        from PySide6.QtWidgets import QScrollArea
-        sa = QScrollArea()
-        sa.setWidget(widget)
-        sa.setWidgetResizable(True)
-        return sa
-
-    def _build_tilts_tab(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        self.tilts_label = QLabel("Select a tilt series.")
-        lay.addWidget(self.tilts_label)
+        c = card()
+        cl = QVBoxLayout(c)
+        cl.setContentsMargins(12, 12, 12, 12)
+        self.tilts_title = section_label("Tilts")
+        cl.addWidget(self.tilts_title)
+        self.tilts_label = dim_label("Select a tilt series.")
+        cl.addWidget(self.tilts_label)
         self.tilt_table = QTableWidget(0, 6)
         self.tilt_table.setHorizontalHeaderLabels(["Use", "Acq #", "Angle", "Dose", "Prior dose", "Fraction file"])
         self.tilt_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tilt_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tilt_table.setAlternatingRowColors(True)
+        self.tilt_table.setShowGrid(False)
         self.tilt_table.verticalHeader().hide()
         hh = self.tilt_table.horizontalHeader()
-        for c in range(5):
-            hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        for col in range(5):
+            hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(5, QHeaderView.Stretch)
         self.tilt_table.itemChanged.connect(self._tilt_toggled)
-        lay.addWidget(self.tilt_table, 1)
+        cl.addWidget(self.tilt_table, 1)
         row = QHBoxLayout()
-        self.btn_preview = QPushButton("Test on one tilt")
-        self.btn_preview.setToolTip("Align the selected tilt (default: the one nearest 0 deg) with the current\n"
-                                    "settings and show unaligned vs aligned. Nothing is written.")
-        self.btn_preview.clicked.connect(self.preview)
-        row.addWidget(QLabel("Uncheck tilts to leave them out of this series' stacks."))
+        row.addWidget(dim_label("Select a tilt, then test the alignment settings on it.", wrap=False))
         row.addStretch()
+        self.btn_preview = QPushButton("Test on one tilt")
+        self.btn_preview.setObjectName("toolButton")
+        self.btn_preview.clicked.connect(self.preview)
         row.addWidget(self.btn_preview)
-        lay.addLayout(row)
-        return w
+        cl.addLayout(row)
+        split.addWidget(c)
+        split.setSizes([320, 420])
+        lay.addWidget(split, 1)
+        return page
 
     def _build_menu(self):
         m = self.menuBar().addMenu("&File")
-        a = QAction("Save settings...", self)
-        a.triggered.connect(self.settings_panel._save)
-        m.addAction(a)
-        a = QAction("Load settings...", self)
-        a.triggered.connect(self.settings_panel._load)
-        m.addAction(a)
+        for text, slot in (("Load settings…", self.forms.load_dialog), ("Save settings…", self.forms.save_dialog)):
+            a = QAction(text, self)
+            a.triggered.connect(slot)
+            m.addAction(a)
         m.addSeparator()
         a = QAction("Quit", self)
         a.triggered.connect(self.close)
@@ -216,34 +334,42 @@ class MainWindow(QMainWindow):
         a = QAction("About pyPrep", self)
         a.triggered.connect(lambda: QMessageBox.about(
             self, "pyPrep", f"<b>pyPrep {__version__}</b><br>Cryo-ET tilt-series preparation: GPU frame "
-                            f"alignment and etomo-ready stacks.<br><br>Compute device: "
-                            f"{gpu.device_summary(gpu.select_device())}"))
+                            f"alignment, etomo-ready stacks and IMOD batchruntomo reconstruction.<br><br>"
+                            f"Compute: {gpu.device_summary(gpu.select_device())}<br>{imod.imod_status()[1]}"))
         h.addAction(a)
+
+    # ------------------------------------------------------------------ navigation
+    def show_page(self, key: str):
+        if key not in self._pages:
+            return
+        self.stack.setCurrentWidget(self._pages[key])
+        for k, b in self._nav_buttons.items():
+            b.setChecked(k == key)
 
     # ------------------------------------------------------------------ persistence
     def _restore(self):
-        self.in_row.edit.setText(self.qs.value("input_dir", ""))
-        self.frames_row.edit.setText(self.qs.value("frames_dir", ""))
-        self.out_row.edit.setText(self.qs.value("output_dir", ""))
-        self.recursive.setChecked(self.qs.value("recursive", "false") == "true")
+        self.top.session.edit.setText(self.qs.value("input_dir", ""))
+        self.frames_path.edit.setText(self.qs.value("frames_dir", ""))
+        self.top.output.edit.setText(self.qs.value("output_dir", ""))
+        self.top.recursive.setChecked(self.qs.value("recursive", "false") == "true")
         raw = self.qs.value("settings", "")
         if raw:
             try:
-                self.settings_panel.set_settings(ProcessingSettings.from_dict(json.loads(raw)))
-            except (ValueError, TypeError):
+                self.forms.set_settings(ProcessingSettings.from_dict(json.loads(raw)))
+            except (ValueError, TypeError, KeyError):
                 pass
         geo = self.qs.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
         else:
-            self.resize(1500, 950)
+            self.resize(1560, 980)
 
     def _save_state(self):
-        self.qs.setValue("input_dir", self.in_row.edit.text())
-        self.qs.setValue("frames_dir", self.frames_row.edit.text())
-        self.qs.setValue("output_dir", self.out_row.edit.text())
-        self.qs.setValue("recursive", "true" if self.recursive.isChecked() else "false")
-        self.qs.setValue("settings", json.dumps(self.settings_panel.get_settings().to_dict()))
+        self.qs.setValue("input_dir", self.top.session.edit.text())
+        self.qs.setValue("frames_dir", self.frames_path.edit.text())
+        self.qs.setValue("output_dir", self.top.output.edit.text())
+        self.qs.setValue("recursive", "true" if self.top.recursive.isChecked() else "false")
+        self.qs.setValue("settings", json.dumps(self.forms.get_settings().to_dict()))
         self.qs.setValue("geometry", self.saveGeometry())
 
     def closeEvent(self, ev):
@@ -253,25 +379,24 @@ class MainWindow(QMainWindow):
                 return
             self.cancel()
             self._thread.quit()
-            self._thread.wait(30000)
+            self._thread.wait(60000)
         self._save_state()
         ev.accept()
 
     # ------------------------------------------------------------------ scanning
     def scan(self):
-        folder = self.in_row.path()
+        folder = self.top.session.path()
         if not folder or not folder.is_dir():
             QMessageBox.warning(self, "pyPrep", "Choose the session folder that contains the .mdoc files.")
             return
-        if not self.out_row.path():
-            self.out_row.edit.setText(str(folder / "pyPrep"))
-        frames_dir = self.frames_row.path()
-        s = self.settings_panel.get_settings()
+        if not self.top.output.path():
+            self.top.output.edit.setText(str(folder / "pyPrep"))
+        frames_dir = self.frames_path.path()
+        s = self.forms.get_settings()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            mdocs = find_mdocs(folder, self.recursive.isChecked())
             self.series = []
-            for m in mdocs:
+            for m in find_mdocs(folder, self.top.recursive.isChecked()):
                 try:
                     self.series.append(load_tilt_series(m, frames_dir, s.default_dose))
                 except Exception as e:
@@ -283,49 +408,64 @@ class MainWindow(QMainWindow):
         for ts in self.series:
             if ts.missing:
                 self.append_log(f"  {ts.name}: {len(ts.missing)} fraction file(s) missing - those tilts will be skipped")
+        self.statusBar().showMessage(f"Found {len(self.series)} tilt series", 5000)
         if self.series:
             self.table.selectRow(0)
+        self.show_page("series")
         self._save_state()
 
     def _fill_table(self):
         self.table.setRowCount(len(self.series))
-        out_root = self.out_row.path()
-        s = self.settings_panel.get_settings()
         for r, ts in enumerate(self.series):
             name = _item(ts.name)
             name.setFlags(name.flags() | Qt.ItemIsUserCheckable)
-            usable = len(ts.usable)
-            name.setCheckState(Qt.Checked if usable else Qt.Unchecked)
-            self.table.setItem(r, 0, name)
-            self.table.setItem(r, 1, _item(len(ts.tilts), True))
+            name.setCheckState(Qt.Checked if ts.usable else Qt.Unchecked)
+            self.table.setItem(r, COL_NAME, name)
+            self.table.setItem(r, COL_TILTS, _item(len(ts.tilts), True))
             miss = _item(len(ts.missing), True)
             if ts.missing:
-                miss.setForeground(QBrush(QColor("#c0392b")))
-            self.table.setItem(r, 2, miss)
+                miss.setForeground(QBrush(QColor(theme.WARNING)))
+            self.table.setItem(r, COL_MISSING, miss)
             angles = [t.angle for t in ts.tilts]
-            self.table.setItem(r, 3, _item(f"{min(angles):+.0f} to {max(angles):+.0f}" if angles else "-"))
-            self.table.setItem(r, 4, _item(f"{ts.pixel_size:.3f}", True))
-            done = out_root is not None and is_complete(ts, s, out_root)
-            self._set_status(r, "done" if done else ("ready" if usable else "no frames"))
-            self.table.setItem(r, 6, _item(""))
+            self.table.setItem(r, COL_RANGE, _item(f"{min(angles):+.0f} to {max(angles):+.0f}" if angles else "-"))
+            self.table.setItem(r, COL_PIXEL, _item(f"{ts.pixel_size:.3f}", True))
+            self.table.setItem(r, COL_TIME, _item("", True))
+        self._refresh_status()
+        self.series_count.setText(f"{len(self.series)} tilt series")
 
-    def _set_status(self, row: int, status: str, extra: str = ""):
+    def _refresh_status(self):
+        out_root = self.top.output.path()
+        s = self.forms.get_settings()
+        for r, ts in enumerate(self.series):
+            if not ts.usable:
+                self._set_cell(r, COL_STACKS, "no frames")
+                self._set_cell(r, COL_TOMO, "-")
+                continue
+            done = out_root is not None and is_complete(ts, s, out_root)
+            self._set_cell(r, COL_STACKS, "done" if done else "ready")
+            if not s.recon.enabled:
+                self._set_cell(r, COL_TOMO, "-")
+            else:
+                tomo = out_root is not None and recon_complete(ts, s, out_root)
+                self._set_cell(r, COL_TOMO, "done" if tomo else "ready")
+
+    def _set_cell(self, row: int, col: int, status: str, extra: str = ""):
         it = _item(status + (f" {extra}" if extra else ""))
-        it.setForeground(QBrush(QColor(STATUS_COLORS.get(status, "#555555"))))
-        self.table.setItem(row, 5, it)
+        it.setForeground(QBrush(QColor(STATUS_COLORS.get(status, theme.TEXT_DIM))))
+        self.table.setItem(row, col, it)
 
     def _check_all(self, state: bool):
         for r in range(self.table.rowCount()):
-            self.table.item(r, 0).setCheckState(Qt.Checked if state else Qt.Unchecked)
+            self.table.item(r, COL_NAME).setCheckState(Qt.Checked if state else Qt.Unchecked)
 
     def _settings_changed(self):
-        # Output choices change which series count as already complete.
         if self.series and self._thread is None:
-            self._fill_table()
+            self._refresh_status()
 
     # ------------------------------------------------------------------ selection
-    def _current_series(self) -> tuple[int, TiltSeries] | tuple[None, None]:
-        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+    def _current_series(self):
+        sm = self.table.selectionModel()
+        rows = sm.selectedRows() if sm else []
         if not rows:
             return None, None
         r = rows[0].row()
@@ -342,7 +482,7 @@ class MainWindow(QMainWindow):
             if t.missing:
                 use.setFlags(Qt.ItemIsEnabled)
                 use.setText("missing")
-                use.setForeground(QBrush(QColor("#c0392b")))
+                use.setForeground(QBrush(QColor(theme.WARNING)))
             else:
                 use.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
                 use.setCheckState(Qt.Unchecked if t.excluded else Qt.Checked)
@@ -354,11 +494,12 @@ class MainWindow(QMainWindow):
             self.tilt_table.setItem(i, 4, _item(f"{t.prior_dose:.2f}", True))
             f = _item(t.frame_path.name if t.frame_path else (t.section.get("SubFramePath") or "?"))
             if t.missing:
-                f.setForeground(QBrush(QColor("#c0392b")))
+                f.setForeground(QBrush(QColor(theme.WARNING)))
             self.tilt_table.setItem(i, 5, f)
         self.tilt_table.blockSignals(False)
-        self.tilts_label.setText(ts.summary() + (f"   |   frames from {ts.frames_dir}" if ts.frames_dir else ""))
-        out_root = self.out_row.path()
+        self.tilts_title.setText(f"Tilts in {ts.name}")
+        self.tilts_label.setText(ts.summary() + (f"  ·  fractions from {ts.frames_dir}" if ts.frames_dir else ""))
+        out_root = self.top.output.path()
         if out_root is not None:
             self.results.load_series(out_root / ts.name)
         else:
@@ -375,11 +516,12 @@ class MainWindow(QMainWindow):
             if t.zvalue == z and not t.missing:
                 t.excluded = item.checkState() != Qt.Checked
 
-    # ------------------------------------------------------------------ preview
+    # ------------------------------------------------------------------ preview / directives
     def preview(self):
         r, ts = self._current_series()
         if ts is None or not ts.usable:
-            QMessageBox.information(self, "pyPrep", "Select a tilt series with fraction files first.")
+            QMessageBox.information(self, "pyPrep", "Select a tilt series with fraction files first "
+                                                    "(Tilt series page).")
             return
         tilt = None
         rows = self.tilt_table.selectionModel().selectedRows()
@@ -388,11 +530,10 @@ class MainWindow(QMainWindow):
             tilt = next((t for t in ts.tilts if t.zvalue == z and not t.missing), None)
         if tilt is None:
             tilt = min(ts.usable, key=lambda t: abs(t.angle))
-        self.btn_preview.setEnabled(False)
-        self.btn_start.setEnabled(False)
-        self.append_log(f"Preview: aligning {ts.name} tilt {tilt.zvalue + 1:03d} ({tilt.angle:+.2f} deg)...")
+        self._set_busy(True, preview=True)
+        self.statusBar().showMessage(f"Aligning {ts.name} tilt {tilt.zvalue + 1:03d} ({tilt.angle:+.2f} deg)…")
         self._preview_series = ts
-        worker = PreviewWorker(ts, tilt, self.settings_panel.get_settings())
+        worker = PreviewWorker(ts, tilt, self.forms.get_settings())
         # Signals from worker threads must go to methods of this QObject (not lambdas),
         # so Qt queues them onto the GUI thread.
         worker.result.connect(self._on_preview_result)
@@ -401,42 +542,70 @@ class MainWindow(QMainWindow):
 
     def _on_preview_result(self, res):
         self.results.show_preview(res, self._preview_series.pixel_size)
-        self.tabs.setCurrentWidget(self.results)
+        self.show_page("results")
         self.append_log(f"Preview: drift {res['drift']:.2f} A in {res['seconds']:.2f} s")
 
     def _on_preview_error(self, msg):
         self.append_log("Preview failed: " + msg)
+        QMessageBox.warning(self, "pyPrep", "Preview failed:\n" + msg.splitlines()[0])
 
     def _preview_done(self):
-        self.btn_preview.setEnabled(True)
-        self.btn_start.setEnabled(True)
+        self._set_busy(False)
+        self.statusBar().showMessage("Ready")
+
+    def show_directives(self):
+        _, ts = self._current_series()
+        s = self.forms.get_settings()
+        pix = (ts.pixel_size if ts else 1.0) * s.recon.bin
+        axis = (ts.tilt_axis if ts and ts.tilt_axis is not None else 0.0)
+        dirs = imod.build_directives(pix, axis, ts.voltage if ts else 300, s.recon)
+        text = (f"# {'Series ' + ts.name if ts else 'No series selected - generic values'}: "
+                f"bin {s.recon.bin} stack, {pix:.2f} A/px, tilt axis {axis:.2f}\n"
+                + "\n".join(f"{k} = {v}" for k, v in dirs.items()))
+        dlg = QDialog(self)
+        dlg.setWindowTitle("batchruntomo directives")
+        dlg.resize(820, 620)
+        v = QVBoxLayout(dlg)
+        ed = QPlainTextEdit(text)
+        ed.setReadOnly(True)
+        ed.setStyleSheet("font-family: Consolas, monospace; font-size: 13px;")
+        v.addWidget(ed)
+        b = QPushButton("Close")
+        b.clicked.connect(dlg.accept)
+        v.addWidget(b, 0, Qt.AlignRight)
+        dlg.exec()
 
     # ------------------------------------------------------------------ batch
     def start(self):
-        err = self.settings_panel.validate()
+        err = self.forms.validate()
         if err:
             QMessageBox.warning(self, "pyPrep", err)
             return
-        out_root = self.out_row.path()
+        out_root = self.top.output.path()
         if out_root is None:
-            QMessageBox.warning(self, "pyPrep", "Choose an output folder.")
+            QMessageBox.warning(self, "pyPrep", "Choose an output folder in the top bar.")
             return
         jobs = [(r, ts) for r, ts in enumerate(self.series)
-                if self.table.item(r, 0).checkState() == Qt.Checked and ts.usable]
+                if self.table.item(r, COL_NAME).checkState() == Qt.Checked and ts.usable]
         if not jobs:
-            QMessageBox.information(self, "pyPrep", "No checked tilt series with fraction files.")
+            QMessageBox.information(self, "pyPrep", "No checked tilt series with fraction files. "
+                                                    "Use 'Find tilt series' first.")
             return
-        settings = self.settings_panel.get_settings()
-        settings.frames_dir = str(self.frames_row.path()) if self.frames_row.path() else None
+        settings = self.forms.get_settings()
+        settings.frames_dir = str(self.frames_path.path()) if self.frames_path.path() else None
         out_root.mkdir(parents=True, exist_ok=True)
         settings.save(out_root / "pyprep_settings_last_run.json")
         self._save_state()
         for r, _ in jobs:
-            self._set_status(r, "queued")
+            self._set_cell(r, COL_STACKS, "queued")
+            if settings.recon.enabled:
+                self._set_cell(r, COL_TOMO, "queued")
         self.overall.setRange(0, len(jobs))
         self.overall.setValue(0)
+        self.overall.setFormat("%v / %m series")
         self.current.setValue(0)
-        self._set_running(True)
+        self._set_busy(True)
+        self.show_page("log")
         worker = BatchWorker(jobs, settings, out_root)
         worker.series_started.connect(self._on_series_started)
         worker.series_progress.connect(self._on_progress)
@@ -444,41 +613,56 @@ class MainWindow(QMainWindow):
         worker.log.connect(self.append_log)
         self._run_in_thread(worker, on_done=self._batch_done)
 
-    def _on_series_started(self, row):
-        self._set_status(row, "running")
-
-    def _batch_done(self):
-        self._set_running(False)
-        self.append_log("Batch finished.")
-
     def cancel(self):
         if self._worker is not None and hasattr(self._worker, "cancel"):
             self._worker.cancel()
-            self.append_log("Cancelling after the current tilt...")
+            self.append_log("Cancelling…")
+            self.run_msg.setText("Cancelling…")
             self.btn_cancel.setEnabled(False)
 
-    def _on_progress(self, row, done, total, msg):
-        self.current.setRange(0, max(total, 1))
-        self.current.setValue(done)
-        self.current.setFormat(f"{self.series[row].name}: {msg}")
-        self._set_status(row, "running", f"{done}/{total}")
+    def _on_series_started(self, row):
+        self._set_cell(row, COL_STACKS, "running")
+        self.run_msg.setText(self.series[row].name)
 
-    def _on_series_finished(self, row, status, seconds):
-        self._set_status(row, "done" if status in ("complete", "skipped") else status,
-                         "(existing)" if status == "skipped" else "")
-        self.table.setItem(row, 6, _item(f"{seconds:.0f} s" if seconds else "", True))
+    def _on_progress(self, row, done, total, msg):
+        name = self.series[row].name
+        self.run_msg.setText(f"{name}\n{msg}")
+        recon_phase = msg.startswith("IMOD") or msg.startswith("Tomogram")
+        if done >= 0:
+            self.current.setRange(0, max(total, 1))
+            self.current.setValue(done)
+        col = COL_TOMO if recon_phase else COL_STACKS
+        if recon_phase:
+            self._set_cell(row, COL_STACKS, "done")
+        self._set_cell(row, col, "running", "" if recon_phase or done < 0 else f"{done}/{total}")
+        self.statusBar().showMessage(f"{name}: {msg}")
+
+    def _on_series_finished(self, row, res):
+        def label(status):
+            return {"complete": "done", "skipped": "done", None: "-"}.get(status, status)
+        self._set_cell(row, COL_STACKS, label(res.get("stacks")))
+        self._set_cell(row, COL_TOMO, label(res.get("recon")))
+        secs = res.get("seconds") or 0
+        self.table.setItem(row, COL_TIME, _item(f"{secs / 60:.1f} min" if secs >= 90 else f"{secs:.0f} s", True))
         self.overall.setValue(self.overall.value() + 1)
         r, ts = self._current_series()
-        if r == row and self.out_row.path():
-            self.results.load_series(self.out_row.path() / ts.name)
+        if r == row and self.top.output.path():
+            self.results.load_series(self.top.output.path() / ts.name)
 
-    def _set_running(self, running: bool):
-        self.btn_start.setEnabled(not running)
-        self.btn_cancel.setEnabled(running)
-        self.btn_scan.setEnabled(not running)
-        self.btn_preview.setEnabled(not running)
-        self.settings_panel.setEnabled(not running)
-        if not running:
+    def _batch_done(self):
+        self._set_busy(False)
+        self.run_msg.setText("Idle")
+        self.append_log("Batch finished.")
+        self.statusBar().showMessage("Batch finished", 10000)
+
+    def _set_busy(self, busy: bool, preview: bool = False):
+        self.btn_start.setEnabled(not busy)
+        self.btn_cancel.setEnabled(busy and not preview)
+        self.top.scan_btn.setEnabled(not busy)
+        self.btn_preview.setEnabled(not busy)
+        self.forms.preview_button_alignment.setEnabled(not busy)
+        self.forms.set_enabled(not busy)
+        if not busy:
             self.current.setFormat("%p%")
 
     def _run_in_thread(self, worker, on_done=None):
@@ -499,13 +683,13 @@ class MainWindow(QMainWindow):
             on_done()
 
     def append_log(self, text: str):
-        self.log.appendPlainText(text.rstrip())
+        self.log_page.append(text)
 
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("pyPrep")
-    app.setStyle("Fusion")
+    app.setApplicationName(APP_TITLE)
+    theme.apply_theme(app)
     icon = Path(__file__).with_name("pyprep.ico")
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))

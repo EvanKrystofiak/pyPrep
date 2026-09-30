@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import platform
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +29,7 @@ ProgressFn = Callable[[int, int, str], None]
 
 KIND_SUFFIX = {"sum": "", "even": "_EVN", "odd": "_ODD", "dw": "_DW"}
 EXCLUDE_TOLERANCE = 0.5   # deg, for matching user-excluded tilt angles
+_RE_IMOD_STEP = re.compile(r"Reached step\s+([0-9.]+)")
 
 
 class Cancelled(Exception):
@@ -49,10 +51,18 @@ def stack_name(series: str, kind: str, b: int) -> str:
     return f"{series}{KIND_SUFFIX[kind]}{'' if b == 1 else f'_bin{b}'}.mrc"
 
 
+def recon_stack_key(settings: ProcessingSettings) -> tuple[str, int]:
+    r = settings.recon
+    return ("dw" if r.use_dose_weighted else "sum", int(r.bin))
+
+
 def planned_outputs(series: TiltSeries, settings: ProcessingSettings, out_dir: Path) -> list[StackOutput]:
+    """Stacks to write: the selected kinds x bin levels, plus the stack reconstruction needs."""
     o = settings.output
-    return [StackOutput(k, int(b), out_dir / stack_name(series.name, k, int(b)))
-            for k in o.stack_kinds() for b in sorted(set(o.bin_levels))]
+    pairs = [(k, int(b)) for k in o.stack_kinds() for b in sorted(set(o.bin_levels))]
+    if settings.recon.enabled and recon_stack_key(settings) not in pairs:
+        pairs.append(recon_stack_key(settings))
+    return [StackOutput(k, b, out_dir / stack_name(series.name, k, b)) for k, b in pairs]
 
 
 def result_json_path(series: TiltSeries, out_dir: Path) -> Path:
@@ -79,11 +89,11 @@ def _apply_exclusions(series: TiltSeries, angles) -> None:
             t.excluded = True
 
 
-def _series_logger(log_path: Path, callback: Callable[[str], None] | None) -> logging.Logger:
-    log = logging.getLogger(f"pyprep.series.{log_path.stem}.{id(log_path)}")
+def _series_logger(log_path: Path, callback: Callable[[str], None] | None, mode: str = "w") -> logging.Logger:
+    log = logging.getLogger(f"pyprep.series.{log_path.stem}.{id(log_path)}.{time.time()}")
     log.setLevel(logging.INFO)
     log.propagate = False
-    fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    fh = logging.FileHandler(log_path, mode=mode, encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s  %(message)s", "%H:%M:%S"))
     log.addHandler(fh)
     if callback is not None:
@@ -180,19 +190,20 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
                 log.info(f"Excluded by user: tilt {t.zvalue + 1:03d} ({t.angle:+.2f} deg)")
         if not tilts:
             raise RuntimeError("no usable tilts (all missing or excluded)")
-        if not o.stack_kinds():
+        outputs = planned_outputs(series, settings, out_dir)
+        if not outputs:
             raise RuntimeError("no outputs selected")
+        kinds = {out.kind for out in outputs}
+        bins = sorted({out.bin for out in outputs})
 
         first = open_movie(tilts[0].frame_path)
         ny, nx = first.shape
-        bins = sorted({int(b) for b in o.bin_levels})
         layout = FrameLayout.for_shape(ny, nx, bins + [int(ms.align_bin)])
         dtype = np.dtype(o.dtype)
         sample = first.read(0, 1)
         if dtype.kind == "i" and sample.dtype.kind == "f":
             log.warning("Input frames are floating point; writing float32 instead of int16")
             dtype = np.dtype(np.float32)
-        outputs = planned_outputs(series, settings, out_dir)
         label = mrc.make_label(f"pyPrep {__version__}: aligned {series.name}")
         for out in outputs:
             writers[(out.kind, out.bin)] = mrc.MrcStackWriter(
@@ -226,7 +237,7 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
                 res = mc.align(frames, series.pixel_size, layout=layout)
                 t2 = time.perf_counter()
                 imgs = mc.sum_frames(frames, res.shifts, series.pixel_size, bins=bins,
-                                     even_odd=o.even_odd, dose_weight=o.dose_weighted,
+                                     even_odd=bool(kinds & {"even", "odd"}), dose_weight="dw" in kinds,
                                      frame_doses=t.doses_for(len(frames)), prior_dose=t.prior_dose,
                                      voltage_kv=series.voltage, layout=layout, to_numpy=False)
                 host = {}
@@ -297,3 +308,96 @@ def process_series(series: TiltSeries, settings: ProcessingSettings, out_root: s
         if device.type == "cuda":
             torch.cuda.empty_cache()
     return record
+
+
+# ---------------------------------------------------------------------- reconstruction
+def recon_dir_for(series: TiltSeries, settings: ProcessingSettings, out_root) -> Path:
+    return Path(out_root) / series.name / f"imod_bin{int(settings.recon.bin)}"
+
+
+def recon_complete(series: TiltSeries, settings: ProcessingSettings, out_root) -> bool:
+    j = recon_dir_for(series, settings, out_root) / "pyprep_recon.json"
+    try:
+        rec = json.loads(j.read_text())
+    except (OSError, ValueError):
+        return False
+    return (rec.get("status") == "complete" and rec.get("preset") == settings.recon.preset
+            and rec.get("tomogram") and Path(rec["tomogram"]).exists())
+
+
+def reconstruct_series(series: TiltSeries, settings: ProcessingSettings, out_root,
+                       progress: ProgressFn | None = None, cancel: threading.Event | None = None,
+                       log_callback: Callable[[str], None] | None = None) -> dict:
+    """Run IMOD batchruntomo on the series' binned stack (which must already exist)."""
+    from . import imod
+
+    out_dir = Path(out_root) / series.name
+    kind, b = recon_stack_key(settings)
+    stack = out_dir / stack_name(series.name, kind, b)
+    log = _series_logger(out_dir / f"{series.name}_pyprep.log", log_callback, mode="a")
+    progress = progress or (lambda i, n, msg: None)
+    total_steps = 15
+
+    def on_line(line: str):
+        log.info(line)
+        m = _RE_IMOD_STEP.match(line)
+        if m:
+            progress(min(int(float(m.group(1))), total_steps), total_steps, f"IMOD step {m.group(1)}")
+        elif "(running " in line:
+            progress(-1, total_steps, "IMOD: " + line.split("(running")[0].strip()[:60])
+
+    try:
+        if not stack.exists():
+            raise RuntimeError(f"{stack.name} not found - run frame alignment first")
+        log.info(f"===== Reconstruction: {imod.PRESETS.get(settings.recon.preset, settings.recon.preset)}, "
+                 f"bin {b} =====")
+        progress(0, total_steps, "IMOD setup")
+        axis = series.tilt_axis if series.tilt_axis is not None else 0.0
+        rec = imod.reconstruct(out_dir, series.name, stack, series.pixel_size * b, axis,
+                               series.voltage, settings.recon, log=on_line, cancel=cancel)
+    except Exception as e:
+        log.exception(f"Reconstruction FAILED: {e}")
+        rec = {"status": "failed", "error": f"{type(e).__name__}: {e}", "preset": settings.recon.preset}
+    finally:
+        _close_logger(log)
+    # Keep the series record in sync so the Results page can find the tomogram.
+    j = result_json_path(series, out_dir)
+    try:
+        info = json.loads(j.read_text())
+        info["reconstruction"] = {k: v for k, v in rec.items() if k != "directives"}
+        j.write_text(json.dumps(info, indent=1))
+    except (OSError, ValueError):
+        pass
+    if rec["status"] == "complete":
+        progress(total_steps, total_steps, "Tomogram done")
+    return rec
+
+
+def run_series(series: TiltSeries, settings: ProcessingSettings, out_root,
+               progress: ProgressFn | None = None, cancel: threading.Event | None = None,
+               log_callback: Callable[[str], None] | None = None) -> dict:
+    """Frame alignment + stacks, then (if enabled) IMOD reconstruction.
+
+    Steps already complete are skipped when ``settings.skip_existing`` is set.
+    Returns {"stacks": status, "recon": status or None, "seconds": total}.
+    """
+    t0 = time.perf_counter()
+    say = log_callback or (lambda s: None)
+    result = {"stacks": None, "recon": None}
+    if settings.skip_existing and is_complete(series, settings, out_root):
+        say(f"{series.name}: stacks already complete - skipped")
+        result["stacks"] = "skipped"
+    else:
+        rec = process_series(series, settings, out_root, progress, cancel, log_callback)
+        result["stacks"] = rec["status"]
+    if settings.recon.enabled and result["stacks"] in ("complete", "skipped"):
+        if cancel is not None and cancel.is_set():
+            result["recon"] = "cancelled"
+        elif settings.skip_existing and recon_complete(series, settings, out_root):
+            say(f"{series.name}: tomogram already complete - skipped")
+            result["recon"] = "skipped"
+        else:
+            result["recon"] = reconstruct_series(series, settings, out_root, progress, cancel,
+                                                 log_callback)["status"]
+    result["seconds"] = round(time.perf_counter() - t0, 1)
+    return result
