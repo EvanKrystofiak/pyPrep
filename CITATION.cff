@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use pyPrep, please cite it as below, together with IMOD and the methods listed in docs/how-it-works.md."
+title: "pyPrep: cryo-ET tilt-series preparation for Windows"
+abstract: >-
+  GPU frame alignment of dose fractions (MRC, TIFF, Falcon EER), etomo-ready
+  tilt-series stacks, and automatic tomogram reconstruction with IMOD
+  batchruntomo, from a desktop app or the command line.
+authors:
+  - family-names: Krystofiak
+    given-names: Evan
+type: software
+version: 0.1.0
+date-released: 2026-09-30
+license: BSD-3-Clause
+repository-code: "https://github.com/EvanKrystofiak/pyPrep"
+keywords:
+  - cryo-electron tomography
+  - cryo-ET
+  - motion correction
+  - tilt series
+  - IMOD
+  - EER

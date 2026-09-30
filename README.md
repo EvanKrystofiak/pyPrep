@@ -104,6 +104,15 @@ The code is organised as follows:
 
 See [How it works](docs/how-it-works.md) for details.
 
+## License and citation
+
+pyPrep is released under the [BSD 3-Clause License](LICENSE). You may use,
+modify and redistribute it, including commercially, provided you keep the
+copyright notice and do not use the author's name to promote derived products.
+
+To cite pyPrep, use **Cite this repository** on the GitHub page (from
+[`CITATION.cff`](CITATION.cff)).
+
 ## Acknowledgements
 
 pyPrep builds on ideas from MotionCor2/3 (frame alignment) and TOMOMAN

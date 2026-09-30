@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,9 @@ name = "pyprep"
 version = "0.1.0"
 description = "Cryo-ET tilt-series preparation: GPU frame alignment and etomo-ready stacks, for Windows"
 requires-python = ">=3.11"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [{ name = "Evan Krystofiak" }]
 dependencies = [
     "numpy",
     "scipy",
